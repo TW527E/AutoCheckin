@@ -34,18 +34,47 @@ def is_login_page(page) -> bool:
     return "/login" in (page.url or "")
 
 
+def login_controls_visible(page) -> bool:
+    selectors = (
+        'input[name="username"]',
+        'input[name="password"]',
+        'button:has-text("Continue with GitHub")',
+        'button:has-text("Sign in with Email or Username")',
+        'button:has-text("Other login options")',
+    )
+    for selector in selectors:
+        try:
+            if page.locator(selector).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def is_authenticated_page(page) -> bool:
     url = page.url or ""
-    return url.startswith("https://agentrouter.org") and "/login" not in url
+    if not url.startswith("https://agentrouter.org"):
+        return False
+    if "/login" not in url:
+        return True
+    # Some AgentRouter deployments complete authentication without changing
+    # the URL. In that case disappearance of the login form is the success
+    # signal; a failed password remains on the same form.
+    return not login_controls_visible(page)
 
 
 def wait_until_signed_in(page, timeout_seconds: int) -> bool:
     deadline = time.monotonic() + timeout_seconds
+    authenticated_checks = 0
     while time.monotonic() < deadline:
         if is_authenticated_page(page):
-            return True
-        time.sleep(1)
-    return is_authenticated_page(page)
+            authenticated_checks += 1
+            if authenticated_checks >= 3:
+                return True
+        else:
+            authenticated_checks = 0
+        time.sleep(0.5)
+    return False
 
 
 def write_example_config(path: Path) -> None:
@@ -167,9 +196,15 @@ def checkin(config: dict[str, Any], force: bool) -> int:
             context.close()
             return 2
         if not wait_until_signed_in(page, config["timeout"]):
+            try:
+                body_text = page.locator("body").inner_text(timeout=2_000)
+                diagnostic = " ".join(body_text.split())[:300]
+            except Exception:
+                diagnostic = "(page text unavailable)"
             print(
                 f"Login did not finish within {config['timeout']} seconds. "
-                "Check the credentials, CAPTCHA, 2FA, or the visible error message.",
+                "Check the credentials, CAPTCHA, 2FA, or the visible error message. "
+                f"Current URL: {page.url}. Page text: {diagnostic}",
                 file=sys.stderr,
             )
             context.close()
