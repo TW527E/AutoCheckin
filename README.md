@@ -1,35 +1,61 @@
 # AgentRouter 自動簽到
 
-這個工具透過重新登入 AgentRouter 觸發簽到，登入方式使用 GitHub OAuth。每次執行會先清除 AgentRouter 的登入 session，再使用保存的 GitHub 瀏覽器 session 完成 OAuth；它不儲存 GitHub 密碼或 Token。
+這個工具可使用兩種方式登入 AgentRouter：
 
-為避免重複刷登入，成功後同一天再次執行會自動跳過。只有在確認需要重試時才使用 `--force`。
+- `password`：使用 AgentRouter 帳號/密碼，自動填入登入表單。
+- `github`：使用 GitHub OAuth；第一次執行時在瀏覽器完成 GitHub 登入。
+
+設定檔位於 `~/.agentrouter-checkin/config.json`，真正的設定檔已被 `.gitignore` 忽略，不會推送到 GitHub。若使用帳密登入，設定檔含有明文密碼；macOS/Linux 建議執行 `chmod 600 ~/.agentrouter-checkin/config.json`。
+
+## 設定帳號密碼
+
+macOS/Linux：
+
+```bash
+./run_checkin.command --init-config
+```
+
+Windows：
+
+```bat
+run_checkin.bat --init-config
+```
+
+接著編輯 `~/.agentrouter-checkin/config.json`（Windows 對應 `%USERPROFILE%\.agentrouter-checkin\config.json`）：
+
+```json
+{
+  "login_method": "password",
+  "username": "your-email-or-username",
+  "password": "your-password",
+  "headless": true,
+  "timeout": 60,
+  "profile_dir": "~/.agentrouter-checkin/chromium-profile",
+  "skip_if_checked_in": true
+}
+```
+
+也可以參考 [config.example.json](config.example.json)。
 
 ## 第一次執行
 
-### macOS
-
-在 Terminal 執行：
+macOS：
 
 ```bash
-cd /Users/tw527e/Documents/ChatGPT/AutoCheckin
-chmod +x run_checkin.command
 ./run_checkin.command
 ```
 
-瀏覽器會開啟，請完成 GitHub 登入、2FA 或授權。成功後，登入狀態會保存到 `~/.agentrouter-checkin/chromium-profile`。
-
-### Windows
-
-先安裝 Python 3.10+，然後在命令提示字元執行：
+Windows：
 
 ```bat
-cd C:\path\to\AutoCheckin
 run_checkin.bat
 ```
 
+啟動腳本會自動建立 Python 虛擬環境、安裝 Playwright 與 Chromium。帳密登入會自動提交；如果網站要求 CAPTCHA、2FA 或其他確認，請在可見瀏覽器中完成。
+
 ## 之後自動執行
 
-登入狀態已存在後，可使用無頭模式：
+設定 `"headless": true` 後，可排程執行：
 
 ```bash
 ./run_checkin.command --headless
@@ -41,15 +67,22 @@ Windows：
 run_checkin.bat --headless
 ```
 
-macOS 可在「行事曆與排程」或 `launchd` 每天執行 `run_checkin.command --headless`；Windows 可在「工作排程器」每天執行 `run_checkin.bat --headless`。建議安排在每天第一次使用前，例如 08:00。
+macOS 可用 `launchd`，Windows 可用「工作排程器」。建議每天執行一次，例如 08:00。
 
 ## 常用選項
 
 ```text
---timeout 300       將首次互動登入等待時間改為 300 秒
---profile-dir PATH  指定登入狀態保存位置
---headless          不顯示瀏覽器，適合排程
---force             忽略今日已成功簽到的記錄並重試
+--config PATH                指定 JSON 設定檔
+--init-config                建立設定檔並結束
+--login-method password      覆寫登入方式：github 或 password
+--username VALUE             覆寫帳號
+--password VALUE             覆寫密碼；建議使用 AGENTROUTER_PASSWORD 環境變數
+--profile-dir PATH           覆寫瀏覽器登入狀態位置
+--timeout 300                登入等待秒數
+--headless / --no-headless   覆寫是否顯示瀏覽器
+--force                      忽略今日已簽到記錄並重試
 ```
 
-如果 GitHub session 過期，重新執行不帶 `--headless` 的命令，在瀏覽器中重新登入即可。
+成功後，同一天再次執行預設會跳過，避免重複登入。若登入 session 過期，重新執行非 headless 模式即可。
+
+也可不在設定檔保存密碼，改用環境變數 `AGENTROUTER_USERNAME` 與 `AGENTROUTER_PASSWORD`。環境變數的值會覆寫設定檔。
