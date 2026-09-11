@@ -63,15 +63,49 @@ if ! command -v systemctl >/dev/null 2>&1; then
     exit 2
 fi
 
+# User services normally use the session bus. SSH and non-login shells often
+# omit its environment, so provide the standard runtime path or use the user
+# manager through systemd's machine transport.
+USER_ID=$(id -u)
+USER_NAME=${USER:-$(id -un)}
+RUNTIME_DIR=${XDG_RUNTIME_DIR:-"/run/user/$USER_ID"}
+if [ -d "$RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+fi
+if [ -S "$RUNTIME_DIR/bus" ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus"
+fi
+
+if command -v loginctl >/dev/null 2>&1; then
+    loginctl enable-linger "$USER_NAME" 2>/dev/null || echo "Warning: could not enable user lingering; services may stop when you log out." >&2
+fi
+
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$RUNTIME_DIR/bus" ]; then
+    SYSTEMCTL_USER_ARGS=(--user)
+elif systemctl --machine="$USER_NAME@.host" --user show-environment >/dev/null 2>&1; then
+    SYSTEMCTL_USER_ARGS=(--machine="$USER_NAME@.host" --user)
+else
+    echo "Cannot connect to the systemd user bus for $USER_NAME." >&2
+    echo "Run this from a logged-in user session, or enable lingering and retry:" >&2
+    echo "  loginctl enable-linger $USER_NAME" >&2
+    echo "  export XDG_RUNTIME_DIR=/run/user/$(id -u)" >&2
+    echo "  export DBUS_SESSION_BUS_ADDRESS=unix:path=\$XDG_RUNTIME_DIR/bus" >&2
+    exit 2
+fi
+
+systemctl_user() {
+    systemctl "${SYSTEMCTL_USER_ARGS[@]}" "$@"
+}
+
 case "$ACTION" in
     show)
-        systemctl --user --no-pager status "$CHECKIN_TIMER" "$TELEGRAM_SERVICE" || true
+        systemctl_user --no-pager status "$CHECKIN_TIMER" "$TELEGRAM_SERVICE" || true
         exit 0
         ;;
     remove)
-        systemctl --user disable --now "$CHECKIN_TIMER" "$TELEGRAM_SERVICE" 2>/dev/null || true
+        systemctl_user disable --now "$CHECKIN_TIMER" "$TELEGRAM_SERVICE" 2>/dev/null || true
         rm -f "$UNIT_DIR/$CHECKIN_SERVICE" "$UNIT_DIR/$CHECKIN_TIMER" "$UNIT_DIR/$TELEGRAM_SERVICE"
-        systemctl --user daemon-reload
+        systemctl_user daemon-reload
         echo "Removed AutoCheckin systemd services."
         exit 0
         ;;
@@ -135,8 +169,8 @@ RestartSec=10
 WantedBy=default.target
 EOF
 
-systemctl --user daemon-reload
-systemctl --user enable --now "$CHECKIN_TIMER"
+systemctl_user daemon-reload
+systemctl_user enable --now "$CHECKIN_TIMER"
 
 if python3 - "$CONFIG_PATH" <<'PY'
 import json
@@ -151,14 +185,10 @@ except (OSError, ValueError, TypeError):
     raise SystemExit(1)
 PY
 then
-    systemctl --user enable --now "$TELEGRAM_SERVICE"
+    systemctl_user enable --now "$TELEGRAM_SERVICE"
 else
-    systemctl --user disable --now "$TELEGRAM_SERVICE" 2>/dev/null || true
+    systemctl_user disable --now "$TELEGRAM_SERVICE" 2>/dev/null || true
     echo "Telegram service was installed but not started: configure telegram.bot_token and telegram.chat_id first." >&2
-fi
-
-if command -v loginctl >/dev/null 2>&1; then
-    loginctl enable-linger "$USER" 2>/dev/null || echo "Warning: could not enable user lingering; services may stop when you log out." >&2
 fi
 
 echo "Installed AutoCheckin systemd timer: $ON_CALENDAR"

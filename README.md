@@ -109,6 +109,17 @@ chmod 600 ./config.json
 
 若要讓使用者登出後服務仍持續執行，安裝器會嘗試啟用 user lingering；若系統拒絕，請由管理員執行 `loginctl enable-linger "$USER"`。
 
+若從 SSH 或非登入 shell 執行時看到 `DBUS_SESSION_BUS_ADDRESS` 或 `XDG_RUNTIME_DIR` 未定義，請先執行：
+
+```bash
+loginctl enable-linger "$USER"
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+./install_linux_systemd.sh
+```
+
+請以安裝服務的同一個使用者執行，不要使用 `sudo`；安裝器也會嘗試透過 `--machine="$USER@.host" --user` 連線 user manager。
+
 ### Telegram Bot
 
 在設定檔填入 BotFather 建立的 Token，以及要接收通知的頻道或群組 Chat ID：
