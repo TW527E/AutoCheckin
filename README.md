@@ -138,17 +138,18 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 }
 ```
 
-Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知實際簽到成功，`error` 會通知錯誤，`skipped` 預設關閉以避免例行的「今日已簽到」訊息。指令服務會持續接收以下指令，且設定會保存到 `telegram_state.json`：
+Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知實際簽到成功，`error` 會通知錯誤，`skipped` 預設關閉以避免例行的「今日已簽到」訊息。Telegram 指令服務啟動時會自動註冊指令，因此在聊天輸入 `/` 就能看到指令與中文說明：
 
 ```text
-/notify_off success
-/notify_on success
-/notify_off error
-/notify_on skipped
-/notify_status
+/enable    顯示選單，選擇要開啟的通知
+/disable   顯示選單，選擇要關閉的通知
+/status    查看所有通知狀態
+/help      顯示使用說明
 ```
 
-指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
+輸入 `/enable` 或 `/disable` 後，Bot 會直接顯示「簽到成功」、「錯誤」、「例行跳過」按鈕；點擊即可完成設定，不必手動輸入通知類型。舊的 `/notify_on success`、`/notify_off error` 與 `/notify_status` 指令仍可使用。
+
+指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行，設定會保存到 `telegram_state.json`。若要在私人聊天操作，請把自己的 Telegram User ID 加入 `admin_chat_ids`。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
 
 ## 常用選項
 
