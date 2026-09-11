@@ -128,7 +128,6 @@ systemd_quote() {
 mkdir -p "$UNIT_DIR"
 quoted_runner=$(systemd_quote "$RUNNER")
 quoted_config=$(systemd_quote "$CONFIG_PATH")
-quoted_script_dir=$(systemd_quote "$SCRIPT_DIR")
 
 cat > "$UNIT_DIR/$CHECKIN_SERVICE" <<EOF
 [Unit]
@@ -136,7 +135,7 @@ Description=AutoCheckin AgentRouter daily sign-in
 
 [Service]
 Type=oneshot
-WorkingDirectory=$quoted_script_dir
+WorkingDirectory=$SCRIPT_DIR
 ExecStart=$quoted_runner --headless --no-telegram-poll --config $quoted_config
 EOF
 
@@ -160,7 +159,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=$quoted_script_dir
+WorkingDirectory=$SCRIPT_DIR
 ExecStart=$quoted_runner --telegram-listen --config $quoted_config
 Restart=always
 RestartSec=10
