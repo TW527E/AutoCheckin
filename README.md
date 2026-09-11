@@ -45,6 +45,12 @@ macOS：
 ./run_checkin.command
 ```
 
+Linux：
+
+```bash
+./run_checkin.sh --no-headless
+```
+
 Windows：
 
 ```bat
@@ -69,6 +75,70 @@ run_checkin.bat --headless
 
 macOS 可用 `launchd`，Windows 可用「工作排程器」。建議每天執行一次，例如 08:00。
 
+### Linux systemd
+
+Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設定檔已完成，尤其是 `login_method`、帳號密碼與 `headless: true`：
+
+```bash
+./run_checkin.sh --init-config
+chmod 600 ~/.agentrouter-checkin/config.json
+```
+
+安裝目前使用者的 systemd timer（預設每天 08:00）與 Telegram 指令服務：
+
+```bash
+./install_linux_systemd.sh
+```
+
+也可以指定 systemd 行事曆時間與設定檔：
+
+```bash
+./install_linux_systemd.sh \
+  --on-calendar "*-*-* 07:30:00" \
+  --config "$HOME/.agentrouter-checkin/config.json"
+```
+
+查看狀態或移除服務：
+
+```bash
+./install_linux_systemd.sh --show
+./install_linux_systemd.sh --remove
+```
+
+簽到服務會使用同一個 Chromium profile 與每日去重記錄。可用 `journalctl --user -u autocheckin-checkin.service` 查看簽到記錄，Telegram 指令服務則可用 `journalctl --user -u autocheckin-telegram.service` 查看。Linux 通常沒有互動式瀏覽器，因此請使用帳密登入並將密碼與 Bot Token 保存在權限為 `600` 的設定檔中；GitHub OAuth、CAPTCHA 或 2FA 需要先以非 headless 模式完成登入。
+
+若要讓使用者登出後服務仍持續執行，安裝器會嘗試啟用 user lingering；若系統拒絕，請由管理員執行 `loginctl enable-linger "$USER"`。
+
+### Telegram Bot
+
+在設定檔填入 BotFather 建立的 Token，以及要接收通知的頻道或群組 Chat ID：
+
+```json
+"telegram": {
+  "bot_token": "123456:replace-with-your-token",
+  "chat_id": "-1001234567890",
+  "admin_chat_ids": [],
+  "poll_commands": true,
+  "notifications": {
+    "success": true,
+    "error": true,
+    "skipped": false
+  }
+}
+```
+
+Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知實際簽到成功，`error` 會通知錯誤，`skipped` 預設關閉以避免例行的「今日已簽到」訊息。指令服務會持續接收以下指令，且設定會保存到 `telegram_state.json`：
+
+```text
+/notify_off success
+/notify_on success
+/notify_off error
+/notify_on skipped
+/notify_status
+```
+
+指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
+
 ## 常用選項
 
 ```text
@@ -81,6 +151,8 @@ macOS 可用 `launchd`，Windows 可用「工作排程器」。建議每天執�
 --timeout 300                登入等待秒數
 --headless / --no-headless   覆寫是否顯示瀏覽器
 --force                      忽略今日已簽到記錄並重試
+--telegram-listen            持續執行 Telegram 指令監聽服務
+--no-telegram-poll           簽到執行時不輪詢 Telegram（由常駐服務負責時使用）
 ```
 
 成功後，同一天再次執行預設會跳過，避免重複登入。若登入 session 過期，重新執行非 headless 模式即可。

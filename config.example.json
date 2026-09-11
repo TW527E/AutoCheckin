@@ -5,5 +5,16 @@
   "headless": true,
   "timeout": 60,
   "profile_dir": "~/.agentrouter-checkin/chromium-profile",
-  "skip_if_checked_in": true
+  "skip_if_checked_in": true,
+  "telegram": {
+    "bot_token": "",
+    "chat_id": "",
+    "admin_chat_ids": [],
+    "poll_commands": true,
+    "notifications": {
+      "success": true,
+      "error": true,
+      "skipped": false
+    }
+  }
 }

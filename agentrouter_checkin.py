@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import stat
@@ -12,6 +13,8 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+from telegram_bot import TelegramNotifier
 
 LOGIN_URL = "https://agentrouter.org/login"
 LOGOUT_URL = "https://agentrouter.org/api/user/logout"
@@ -27,6 +30,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "timeout": 180,
     "profile_dir": str(DEFAULT_PROFILE_DIR),
     "skip_if_checked_in": True,
+    "telegram": {
+        "bot_token": "",
+        "chat_id": "",
+        "admin_chat_ids": [],
+        "poll_commands": True,
+        "notifications": {
+            "success": True,
+            "error": True,
+            "skipped": False,
+        },
+    },
 }
 
 
@@ -85,7 +99,7 @@ def write_example_config(path: Path) -> None:
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)
     if not path.exists():
         return config
     try:
@@ -111,14 +125,33 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in ("headless", "skip_if_checked_in"):
         if not isinstance(config.get(key), bool):
             raise ValueError(f"{key} must be true or false")
+    telegram = config.get("telegram", {})
+    if not isinstance(telegram, dict):
+        raise ValueError("telegram must be an object")
+    token = str(telegram.get("bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = str(telegram.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if token and not chat_id:
+        raise ValueError("telegram.chat_id is required when a Telegram bot token is configured")
+    if not isinstance(telegram.get("admin_chat_ids", []), list):
+        raise ValueError("telegram.admin_chat_ids must be a list")
+    if not isinstance(telegram.get("poll_commands", True), bool):
+        raise ValueError("telegram.poll_commands must be true or false")
+    notifications = telegram.get("notifications", {})
+    if not isinstance(notifications, dict):
+        raise ValueError("telegram.notifications must be an object")
+    for key in ("success", "error", "skipped"):
+        if key in notifications and not isinstance(notifications[key], bool):
+            raise ValueError(f"telegram.notifications.{key} must be true or false")
 
 
 def warn_about_config_permissions(path: Path, config: dict[str, Any]) -> None:
-    if os.name == "nt" or not path.exists() or not config.get("password"):
+    telegram = config.get("telegram", {})
+    has_token = isinstance(telegram, dict) and bool(telegram.get("bot_token"))
+    if os.name == "nt" or not path.exists() or not (config.get("password") or has_token):
         return
     if path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         print(
-            f"Warning: {path} contains a password and is accessible by other users. Run: chmod 600 {path}",
+            f"Warning: {path} contains credentials and is accessible by other users. Run: chmod 600 {path}",
             file=sys.stderr,
         )
 
@@ -145,7 +178,7 @@ def start_password_login(page, username: str, password: str) -> None:
     print("AgentRouter password login submitted.")
 
 
-def checkin(config: dict[str, Any], force: bool) -> int:
+def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | None = None) -> int:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -154,6 +187,8 @@ def checkin(config: dict[str, Any], force: bool) -> int:
             "Playwright is not installed. Run the platform launcher first so it can install dependencies.",
             file=sys.stderr,
         )
+        if notifier:
+            notifier.send("error", "AgentRouter 簽到錯誤：Playwright 尚未安裝。")
         return 2
 
     profile_dir = Path(str(config["profile_dir"])).expanduser()
@@ -167,6 +202,8 @@ def checkin(config: dict[str, Any], force: bool) -> int:
         and state_file.read_text(encoding="utf-8").strip() == today
     ):
         print(f"Already checked in today ({today}); skipping duplicate login.")
+        if notifier:
+            notifier.send("skipped", f"AgentRouter 今日已簽到，略過重複登入。\n日期：{today}")
         return 0
 
     with sync_playwright() as pw:
@@ -184,6 +221,8 @@ def checkin(config: dict[str, Any], force: bool) -> int:
         if not is_login_page(page):
             print(f"Login page redirected to an authenticated page: {page.url}")
             state_file.write_text(today + "\n", encoding="utf-8")
+            if notifier:
+                notifier.send("success", f"AgentRouter 簽到成功（既有登入狀態）。\n日期：{today}\n網址：{page.url}")
             context.close()
             return 0
         try:
@@ -193,6 +232,8 @@ def checkin(config: dict[str, Any], force: bool) -> int:
                 start_github_login(page)
         except PlaywrightTimeoutError:
             print("Could not find the expected login controls; the site layout may have changed.", file=sys.stderr)
+            if notifier:
+                notifier.send("error", "AgentRouter 簽到錯誤：找不到預期的登入控制項，網站版面可能已變更。")
             context.close()
             return 2
         if not wait_until_signed_in(page, config["timeout"]):
@@ -207,12 +248,19 @@ def checkin(config: dict[str, Any], force: bool) -> int:
                 f"Current URL: {page.url}. Page text: {diagnostic}",
                 file=sys.stderr,
             )
+            if notifier:
+                notifier.send(
+                    "error",
+                    f"AgentRouter 簽到錯誤：登入未在 {config['timeout']} 秒內完成。\n目前網址：{page.url}\n頁面訊息：{diagnostic}",
+                )
             context.close()
             return 1
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(1500)
         state_file.write_text(today + "\n", encoding="utf-8")
         print(f"Signed in successfully with {config['login_method']}: {page.url}")
+        if notifier:
+            notifier.send("success", f"AgentRouter 簽到成功。\n日期：{today}\n登入方式：{config['login_method']}\n網址：{page.url}")
         context.close()
         return 0
 
@@ -233,6 +281,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, help="Override config timeout")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--force", action="store_true", help="Run even if this machine already checked in today")
+    parser.add_argument("--telegram-listen", action="store_true", help="Run the Telegram command listener continuously")
+    parser.add_argument("--no-telegram-poll", action="store_true", help="Do not poll Telegram during a check-in run")
     return parser.parse_args()
 
 
@@ -246,8 +296,17 @@ def main() -> int:
         write_example_config(config_path)
         print(f"Created config: {config_path}")
         return 0
+    notifier: TelegramNotifier | None = None
     try:
         config = load_config(config_path)
+        telegram = config.setdefault("telegram", {})
+        if args.telegram_listen and not isinstance(telegram, dict):
+            raise ValueError("telegram must be an object")
+        if isinstance(telegram, dict):
+            if os.environ.get("TELEGRAM_BOT_TOKEN"):
+                telegram["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+            if os.environ.get("TELEGRAM_CHAT_ID"):
+                telegram["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
         overrides = {
             "login_method": args.login_method,
             "username": args.username or os.environ.get("AGENTROUTER_USERNAME"),
@@ -257,12 +316,33 @@ def main() -> int:
             "headless": args.headless,
         }
         config.update({key: value for key, value in overrides.items() if value is not None})
+        notifier = TelegramNotifier(config, config_path.parent / "telegram_state.json")
         validate_config(config)
     except ValueError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
+        if notifier:
+            notifier.send("error", f"AgentRouter 簽到設定錯誤：{exc}")
         return 2
     warn_about_config_permissions(config_path, config)
-    return checkin(config, args.force)
+    assert notifier is not None
+    if args.telegram_listen:
+        try:
+            notifier.listen_forever()
+            return 0
+        except Exception as exc:
+            print(f"Telegram listener error: {exc}", file=sys.stderr)
+            return 1
+    try:
+        if not args.no_telegram_poll:
+            try:
+                notifier.poll_commands()
+            except Exception as exc:
+                print(f"Warning: Telegram command polling failed: {exc}", file=sys.stderr)
+        return checkin(config, args.force, notifier)
+    except Exception as exc:
+        print(f"Unexpected check-in error: {exc}", file=sys.stderr)
+        notifier.send("error", f"AgentRouter 簽到發生未預期錯誤：{exc}")
+        return 1
 
 
 if __name__ == "__main__":
