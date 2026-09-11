@@ -18,7 +18,8 @@ from telegram_bot import TelegramNotifier
 
 LOGIN_URL = "https://agentrouter.org/login"
 LOGOUT_URL = "https://agentrouter.org/api/user/logout"
-DEFAULT_CONFIG_PATH = Path.home() / ".agentrouter-checkin" / "config.json"
+PROGRAM_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_PATH = PROGRAM_DIR / "config.json"
 DEFAULT_PROFILE_DIR = Path.home() / ".agentrouter-checkin" / "chromium-profile"
 LOGIN_METHODS = {"github", "password"}
 

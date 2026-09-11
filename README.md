@@ -5,7 +5,7 @@
 - `password`：使用 AgentRouter 帳號/密碼，自動填入登入表單。
 - `github`：使用 GitHub OAuth；第一次執行時在瀏覽器完成 GitHub 登入。
 
-設定檔位於 `~/.agentrouter-checkin/config.json`，真正的設定檔已被 `.gitignore` 忽略，不會推送到 GitHub。若使用帳密登入，設定檔含有明文密碼；macOS/Linux 建議執行 `chmod 600 ~/.agentrouter-checkin/config.json`。
+設定檔位於程序目錄下的 `config.json`，真正的設定檔已被 `.gitignore` 忽略，不會推送到 GitHub。若使用帳密或 Telegram Bot，設定檔含有敏感資訊；macOS/Linux 建議執行 `chmod 600 ./config.json`。
 
 ## 設定帳號密碼
 
@@ -21,7 +21,7 @@ Windows：
 run_checkin.bat --init-config
 ```
 
-接著編輯 `~/.agentrouter-checkin/config.json`（Windows 對應 `%USERPROFILE%\.agentrouter-checkin\config.json`）：
+接著編輯程序目錄下的 `config.json`：
 
 ```json
 {
@@ -81,7 +81,7 @@ Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設
 
 ```bash
 ./run_checkin.sh --init-config
-chmod 600 ~/.agentrouter-checkin/config.json
+chmod 600 ./config.json
 ```
 
 安裝目前使用者的 systemd timer（預設每天 08:00）與 Telegram 指令服務：
@@ -95,7 +95,7 @@ chmod 600 ~/.agentrouter-checkin/config.json
 ```bash
 ./install_linux_systemd.sh \
   --on-calendar "*-*-* 07:30:00" \
-  --config "$HOME/.agentrouter-checkin/config.json"
+  --config "$PWD/config.json"
 ```
 
 查看狀態或移除服務：

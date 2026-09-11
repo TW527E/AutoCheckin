@@ -7,7 +7,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 CHECKIN_SERVICE="autocheckin-checkin.service"
 CHECKIN_TIMER="autocheckin-checkin.timer"
 TELEGRAM_SERVICE="autocheckin-telegram.service"
-CONFIG_PATH=${AGENTROUTER_CONFIG:-"$HOME/.agentrouter-checkin/config.json"}
+CONFIG_PATH=${AGENTROUTER_CONFIG:-"$SCRIPT_DIR/config.json"}
 ON_CALENDAR=${AUTOCHECKIN_ON_CALENDAR:-"*-*-* 08:00:00"}
 ACTION=install
 
