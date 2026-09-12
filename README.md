@@ -112,7 +112,7 @@ chmod 600 ./config.json
 
 若要讓使用者登出後服務仍持續執行，安裝器會嘗試啟用 user lingering；若系統拒絕，請由管理員執行 `loginctl enable-linger "$USER"`。
 
-若從 SSH 或非登入 shell 執行時看到 `DBUS_SESSION_BUS_ADDRESS` 或 `XDG_RUNTIME_DIR` 未定義，請先執行：
+安裝器會自動啟用 lingering、啟動 `user@<UID>.service`，並建立 user bus，不需要手動設定環境變數。若系統政策阻止安裝器啟動 user manager，才需要從 SSH 或非登入 shell 手動執行：
 
 ```bash
 loginctl enable-linger "$USER"

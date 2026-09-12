@@ -72,7 +72,7 @@ RUNTIME_DIR=${XDG_RUNTIME_DIR:-"/run/user/$USER_ID"}
 if [ -d "$RUNTIME_DIR" ]; then
     export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 fi
-if [ -S "$RUNTIME_DIR/bus" ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+if [ -S "$RUNTIME_DIR/bus" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus"
 fi
 
@@ -80,7 +80,22 @@ if command -v loginctl >/dev/null 2>&1; then
     loginctl enable-linger "$USER_NAME" 2>/dev/null || echo "Warning: could not enable user lingering; services may stop when you log out." >&2
 fi
 
-if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$RUNTIME_DIR/bus" ]; then
+# Lingering makes the user manager eligible to run, but on a fresh SSH shell
+# it may not have been started yet. Starting it through the system manager
+# creates the runtime directory and user bus without requiring manual exports.
+if [ "$(id -u)" -eq 0 ]; then
+    systemctl start "user@${USER_ID}.service" 2>/dev/null || true
+fi
+
+# The user manager may have created /run/user/<UID> only after it started.
+if [ -d "$RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+fi
+if [ -S "$RUNTIME_DIR/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus"
+fi
+
+if [ -S "$RUNTIME_DIR/bus" ] && systemctl --user show-environment >/dev/null 2>&1; then
     SYSTEMCTL_USER_ARGS=(--user)
 elif systemctl --machine="$USER_NAME@.host" --user show-environment >/dev/null 2>&1; then
     SYSTEMCTL_USER_ARGS=(--machine="$USER_NAME@.host" --user)
