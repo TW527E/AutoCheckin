@@ -15,7 +15,9 @@
     "notifications": {
       "success": true,
       "error": true,
-      "skipped": false
+      "cookie_session": true,
+      "layout": true,
+      "system": true
     }
   }
 }

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from telegram_bot import TelegramNotifier
+from telegram_bot import NOTIFICATION_TYPES, TelegramNotifier
 
 LOGIN_URL = "https://agentrouter.org/login"
 LOGOUT_URL = "https://agentrouter.org/api/user/logout"
@@ -41,7 +41,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "notifications": {
             "success": True,
             "error": True,
-            "skipped": False,
+            "cookie_session": True,
+            "layout": True,
+            "system": True,
         },
     },
 }
@@ -149,7 +151,7 @@ def validate_config(config: dict[str, Any]) -> None:
     notifications = telegram.get("notifications", {})
     if not isinstance(notifications, dict):
         raise ValueError("telegram.notifications must be an object")
-    for key in ("success", "error", "skipped"):
+    for key in (*NOTIFICATION_TYPES, "skipped"):
         if key in notifications and not isinstance(notifications[key], bool):
             raise ValueError(f"telegram.notifications.{key} must be true or false")
 
@@ -212,8 +214,6 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
         and state_file.read_text(encoding="utf-8").strip() == today
     ):
         print(f"Already checked in today ({today}); skipping duplicate login.")
-        if notifier:
-            notifier.send("skipped", f"AgentRouter 今日已簽到，略過重複登入。\n日期：{today}")
         return 0
 
     with sync_playwright() as pw:

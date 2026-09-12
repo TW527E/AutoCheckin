@@ -11,17 +11,24 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-NOTIFICATION_TYPES = ("success", "error", "skipped")
-DEFAULT_NOTIFICATIONS = {"success": True, "error": True, "skipped": False}
+NOTIFICATION_TYPES = ("success", "error", "cookie_session", "layout", "system")
+DEFAULT_NOTIFICATIONS = {
+    "success": True,
+    "error": True,
+    "cookie_session": True,
+    "layout": True,
+    "system": True,
+}
 NOTIFICATION_LABELS = {
     "success": "簽到成功",
     "error": "錯誤",
-    "skipped": "例行跳過",
+    "cookie_session": "Cookie/session",
+    "layout": "排版",
+    "system": "系統",
 }
 BOT_COMMANDS = [
-    {"command": "enable", "description": "開啟指定通知"},
-    {"command": "disable", "description": "關閉指定通知"},
-    {"command": "status", "description": "查看通知設定"},
+    {"command": "toggle", "description": "切換通知設定"},
+    {"command": "status", "description": "查看通知狀態"},
     {"command": "help", "description": "顯示指令說明"},
 ]
 
@@ -92,6 +99,9 @@ class TelegramNotifier:
             return False
         if not self.state["notifications"].get(notification_type, False):
             return False
+        prefix = {"success": "✅", "error": "❌"}.get(notification_type)
+        if prefix:
+            text = f"{prefix} {text}"
         try:
             self._request("sendMessage", {"chat_id": self.chat_id, "text": text})
             return True
@@ -142,16 +152,8 @@ class TelegramNotifier:
             return
         parts = text.split()
         command = parts[0].split("@", 1)[0].lower()
-        if command in {"/enable", "/notify_on", "/notifications_on"}:
-            if len(parts) == 2:
-                self._set_notification(parts[1], True, source_chat_id)
-            else:
-                self._show_notification_menu(source_chat_id, True)
-        elif command in {"/disable", "/notify_off", "/notifications_off"}:
-            if len(parts) == 2:
-                self._set_notification(parts[1], False, source_chat_id)
-            else:
-                self._show_notification_menu(source_chat_id, False)
+        if command == "/toggle":
+            self._show_notification_menu(source_chat_id)
         elif command in {"/status", "/notify_status", "/notifications"}:
             self._reply(source_chat_id, self.status_text())
         elif command in {"/start", "/help"}:
@@ -160,19 +162,17 @@ class TelegramNotifier:
     def _set_notification(self, notification_type: str, enabled: bool, reply_chat_id: str) -> None:
         notification_type = notification_type.lower()
         if notification_type not in NOTIFICATION_TYPES:
-            self._reply(reply_chat_id, "請使用 /enable 或 /disable，然後從選單選擇通知類型。")
+            self._reply(reply_chat_id, "請使用 /toggle，然後從選單選擇通知類型。")
             return
         self.state["notifications"][notification_type] = enabled
         self._save_state()
         state = "已開啟" if enabled else "已關閉"
         self._reply(reply_chat_id, f"{state}「{NOTIFICATION_LABELS[notification_type]}」通知。")
 
-    def _show_notification_menu(self, chat_id: str, enabled: bool) -> None:
-        action = "enable" if enabled else "disable"
-        title = "選擇要開啟的通知類型：" if enabled else "選擇要關閉的通知類型："
-        self._reply(chat_id, title, self._notification_keyboard(action))
+    def _show_notification_menu(self, chat_id: str) -> None:
+        self._reply(chat_id, "請選擇要切換的通知類型：", self._notification_keyboard())
 
-    def _notification_keyboard(self, action: str) -> dict[str, Any]:
+    def _notification_keyboard(self) -> dict[str, Any]:
         notifications = self.state["notifications"]
         rows = []
         for notification_type in NOTIFICATION_TYPES:
@@ -181,10 +181,19 @@ class TelegramNotifier:
                 [
                     {
                         "text": f"{state} {NOTIFICATION_LABELS[notification_type]}",
-                        "callback_data": f"notify:{action}:{notification_type}",
+                        "callback_data": f"toggle:{notification_type}",
                     }
                 ]
             )
+        all_enabled = all(notifications.get(name, False) for name in NOTIFICATION_TYPES)
+        rows.append(
+            [
+                {
+                    "text": f"{'✅' if all_enabled else '❌'} 全部通知",
+                    "callback_data": "toggle:all",
+                }
+            ]
+        )
         return {"inline_keyboard": rows}
 
     def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
@@ -198,29 +207,34 @@ class TelegramNotifier:
             return
         data = str(callback_query.get("data") or "")
         parts = data.split(":")
-        if len(parts) != 3 or parts[0] != "notify" or parts[1] not in {"enable", "disable"}:
+        if len(parts) != 2 or parts[0] != "toggle":
             self._answer_callback(callback_id, "無效的操作。", show_alert=True)
             return
-        notification_type = parts[2]
-        if notification_type not in NOTIFICATION_TYPES:
+        notification_type = parts[1]
+        if notification_type != "all" and notification_type not in NOTIFICATION_TYPES:
             self._answer_callback(callback_id, "未知的通知類型。", show_alert=True)
             return
-        enabled = parts[1] == "enable"
-        self.state["notifications"][notification_type] = enabled
+        if notification_type == "all":
+            enabled = not all(self.state["notifications"].get(name, False) for name in NOTIFICATION_TYPES)
+            for name in NOTIFICATION_TYPES:
+                self.state["notifications"][name] = enabled
+        else:
+            enabled = not self.state["notifications"].get(notification_type, False)
+            self.state["notifications"][notification_type] = enabled
         self._save_state()
+        changed_name = "全部通知" if notification_type == "all" else NOTIFICATION_LABELS[notification_type]
         state = "已開啟" if enabled else "已關閉"
-        self._answer_callback(callback_id, f"{state} {NOTIFICATION_LABELS[notification_type]}")
+        self._answer_callback(callback_id, f"{state} {changed_name}")
         message_id = message.get("message_id")
         if source_chat_id and isinstance(message_id, int):
-            title = "選擇要開啟的通知類型：" if enabled else "選擇要關閉的通知類型："
             try:
                 self._request(
                     "editMessageText",
                     {
                         "chat_id": source_chat_id,
                         "message_id": message_id,
-                        "text": f"{title}\n\n{self.status_text()}",
-                        "reply_markup": self._notification_keyboard(parts[1]),
+                        "text": f"請選擇要切換的通知類型：\n\n{self.status_text()}",
+                        "reply_markup": self._notification_keyboard(),
                     },
                 )
             except Exception as exc:
@@ -259,7 +273,7 @@ class TelegramNotifier:
         )
 
     def help_text(self) -> str:
-        return "通知設定指令：\n/enable 開啟通知\n/disable 關閉通知\n/status 查看目前設定\n/help 顯示此說明"
+        return "通知設定指令：\n/toggle 顯示並切換通知\n/status 查看目前設定\n/help 顯示此說明"
 
     def listen_forever(self) -> None:
         if not self.configured:
