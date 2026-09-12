@@ -117,6 +117,25 @@ if [ ! -f "$CONFIG_PATH" ]; then
     exit 2
 fi
 
+TIMEZONE=$(python3 - "$CONFIG_PATH" <<'PY'
+import json
+import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        config = json.load(stream)
+    timezone = config.get("timezone", "Asia/Taipei")
+    ZoneInfo(timezone)
+    print(timezone)
+except (OSError, ValueError, TypeError, ZoneInfoNotFoundError):
+    raise SystemExit(1)
+PY
+) || {
+    echo "Invalid timezone in config. Use an IANA timezone such as Asia/Taipei." >&2
+    exit 2
+}
+
 systemd_quote() {
     local value=$1
     value=${value//\\/\\\\}
@@ -144,7 +163,7 @@ cat > "$UNIT_DIR/$CHECKIN_TIMER" <<EOF
 Description=Run AutoCheckin AgentRouter sign-in on schedule
 
 [Timer]
-OnCalendar=$ON_CALENDAR
+OnCalendar=$ON_CALENDAR $TIMEZONE
 Persistent=true
 Unit=$CHECKIN_SERVICE
 

@@ -176,11 +176,11 @@ class TelegramNotifier:
         notifications = self.state["notifications"]
         rows = []
         for notification_type in NOTIFICATION_TYPES:
-            state = "開啟中" if notifications.get(notification_type, False) else "已關閉"
+            state = "✅" if notifications.get(notification_type, False) else "❌"
             rows.append(
                 [
                     {
-                        "text": f"{NOTIFICATION_LABELS[notification_type]} ({state})",
+                        "text": f"{state} {NOTIFICATION_LABELS[notification_type]}",
                         "callback_data": f"notify:{action}:{notification_type}",
                     }
                 ]

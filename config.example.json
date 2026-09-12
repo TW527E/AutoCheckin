@@ -6,6 +6,7 @@
   "timeout": 60,
   "profile_dir": "~/.agentrouter-checkin/chromium-profile",
   "skip_if_checked_in": true,
+  "timezone": "Asia/Taipei",
   "telegram": {
     "bot_token": "",
     "chat_id": "",

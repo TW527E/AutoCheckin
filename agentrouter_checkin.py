@@ -10,9 +10,10 @@ import os
 import stat
 import sys
 import time
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram_bot import TelegramNotifier
 
@@ -31,6 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "timeout": 180,
     "profile_dir": str(DEFAULT_PROFILE_DIR),
     "skip_if_checked_in": True,
+    "timezone": "Asia/Taipei",
     "telegram": {
         "bot_token": "",
         "chat_id": "",
@@ -123,6 +125,13 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("password is required when login_method is 'password'")
     if not isinstance(config.get("timeout"), int) or config["timeout"] <= 0:
         raise ValueError("timeout must be a positive integer")
+    timezone = config.get("timezone")
+    if not isinstance(timezone, str) or not timezone.strip():
+        raise ValueError("timezone must be a valid IANA timezone name, for example 'Asia/Taipei'")
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"timezone must be a valid IANA timezone name: {timezone}") from exc
     for key in ("headless", "skip_if_checked_in"):
         if not isinstance(config.get(key), bool):
             raise ValueError(f"{key} must be true or false")
@@ -195,7 +204,7 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
     profile_dir = Path(str(config["profile_dir"])).expanduser()
     profile_dir.mkdir(parents=True, exist_ok=True)
     state_file = profile_dir / "last_checkin_date.txt"
-    today = date.today().isoformat()
+    today = datetime.now(ZoneInfo(config["timezone"])).date().isoformat()
     if (
         config["skip_if_checked_in"]
         and not force

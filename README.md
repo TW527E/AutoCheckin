@@ -31,11 +31,14 @@ run_checkin.bat --init-config
   "headless": true,
   "timeout": 60,
   "profile_dir": "~/.agentrouter-checkin/chromium-profile",
-  "skip_if_checked_in": true
+  "skip_if_checked_in": true,
+  "timezone": "Asia/Taipei"
 }
 ```
 
 也可以參考 [config.example.json](config.example.json)。
+
+`timezone` 使用 IANA 時區名稱；目前預設為 `Asia/Taipei`（UTC+8）。例如台灣伺服器即使系統時區是 UTC+9，簽到日期與排程仍會以 `Asia/Taipei` 計算。
 
 ## 第一次執行
 
@@ -77,14 +80,14 @@ macOS 可用 `launchd`，Windows 可用「工作排程器」。建議每天執�
 
 ### Linux systemd
 
-Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設定檔已完成，尤其是 `login_method`、帳號密碼與 `headless: true`：
+Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設定檔已完成，尤其是 `login_method`、帳號密碼、`headless: true` 與 `timezone: "Asia/Taipei"`：
 
 ```bash
 ./run_checkin.sh --init-config
 chmod 600 ./config.json
 ```
 
-安裝目前使用者的 systemd timer（預設每天 08:00）與 Telegram 指令服務：
+安裝目前使用者的 systemd timer（預設每天 08:00，使用設定檔中的時區）與 Telegram 指令服務：
 
 ```bash
 ./install_linux_systemd.sh
