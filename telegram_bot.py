@@ -11,20 +11,12 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-NOTIFICATION_TYPES = ("success", "error", "cookie_session", "layout", "system")
-DEFAULT_NOTIFICATIONS = {
-    "success": True,
-    "error": True,
-    "cookie_session": True,
-    "layout": True,
-    "system": True,
-}
+NOTIFICATION_TYPES = ("success", "error", "skipped")
+DEFAULT_NOTIFICATIONS = {"success": True, "error": True, "skipped": False}
 NOTIFICATION_LABELS = {
     "success": "簽到成功",
     "error": "錯誤",
-    "cookie_session": "Cookie/session",
-    "layout": "排版",
-    "system": "系統",
+    "skipped": "例行跳過",
 }
 BOT_COMMANDS = [
     {"command": "toggle", "description": "切換通知設定"},
@@ -155,22 +147,12 @@ class TelegramNotifier:
         if command == "/toggle":
             self._show_notification_menu(source_chat_id)
         elif command in {"/status", "/notify_status", "/notifications"}:
-            self._reply(source_chat_id, self.status_text())
+            self._show_notification_menu(source_chat_id)
         elif command in {"/start", "/help"}:
             self._reply(source_chat_id, self.help_text())
 
-    def _set_notification(self, notification_type: str, enabled: bool, reply_chat_id: str) -> None:
-        notification_type = notification_type.lower()
-        if notification_type not in NOTIFICATION_TYPES:
-            self._reply(reply_chat_id, "請使用 /toggle，然後從選單選擇通知類型。")
-            return
-        self.state["notifications"][notification_type] = enabled
-        self._save_state()
-        state = "已開啟" if enabled else "已關閉"
-        self._reply(reply_chat_id, f"{state}「{NOTIFICATION_LABELS[notification_type]}」通知。")
-
     def _show_notification_menu(self, chat_id: str) -> None:
-        self._reply(chat_id, "請選擇要切換的通知類型：", self._notification_keyboard())
+        self._reply(chat_id, "通知狀態（點擊按鈕切換）：", self._notification_keyboard())
 
     def _notification_keyboard(self) -> dict[str, Any]:
         notifications = self.state["notifications"]
@@ -233,7 +215,7 @@ class TelegramNotifier:
                     {
                         "chat_id": source_chat_id,
                         "message_id": message_id,
-                        "text": f"請選擇要切換的通知類型：\n\n{self.status_text()}",
+                        "text": "通知狀態（點擊按鈕切換）：",
                         "reply_markup": self._notification_keyboard(),
                     },
                 )
@@ -273,7 +255,7 @@ class TelegramNotifier:
         )
 
     def help_text(self) -> str:
-        return "通知設定指令：\n/toggle 顯示並切換通知\n/status 查看目前設定\n/help 顯示此說明"
+        return "通知設定指令：\n/toggle 顯示並切換通知\n/status 顯示目前狀態\n/help 顯示此說明"
 
     def listen_forever(self) -> None:
         if not self.configured:

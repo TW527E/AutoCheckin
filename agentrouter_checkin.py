@@ -41,9 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "notifications": {
             "success": True,
             "error": True,
-            "cookie_session": True,
-            "layout": True,
-            "system": True,
+            "skipped": False,
         },
     },
 }

@@ -136,9 +136,7 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   "notifications": {
     "success": true,
     "error": true,
-    "cookie_session": true,
-    "layout": true,
-    "system": true
+    "skipped": false
   }
 }
 ```
@@ -147,11 +145,11 @@ Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知
 
 ```text
 /toggle    顯示選單並切換通知
-/status    查看所有通知狀態
+/status    以選單查看通知狀態
 /help      顯示使用說明
 ```
 
-輸入 `/toggle` 後，Bot 會直接顯示「成功通知」、「錯誤通知」、「Cookie/session 通知」、「排版通知」、「系統通知」、「全部通知」六個按鈕；按鈕前的 `✅` 表示開啟，`❌` 表示關閉，點擊即可切換狀態。
+輸入 `/toggle` 或 `/status` 後，Bot 會用附圖的垂直按鈕格式顯示現有通知類型與「全部通知」；按鈕前的 `✅` 表示開啟，`❌` 表示關閉，點擊即可切換狀態。
 
 指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行，設定會保存到 `telegram_state.json`。若要在私人聊天操作，請把自己的 Telegram User ID 加入 `admin_chat_ids`。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
 
