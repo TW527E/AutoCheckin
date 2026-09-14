@@ -3,6 +3,7 @@
   "username": "your-email-or-username",
   "password": "your-password",
   "headless": true,
+  "browser": "chromium",
   "timeout": 60,
   "profile_dir": "~/.agentrouter-checkin/chromium-profile",
   "skip_if_checked_in": true,

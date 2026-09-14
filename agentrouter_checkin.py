@@ -23,12 +23,14 @@ PROGRAM_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROGRAM_DIR / "config.json"
 DEFAULT_PROFILE_DIR = Path.home() / ".agentrouter-checkin" / "chromium-profile"
 LOGIN_METHODS = {"github", "password"}
+BROWSERS = ("chromium", "chrome")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "login_method": "github",
     "username": "",
     "password": "",
     "headless": False,
+    "browser": "chromium",
     "timeout": 180,
     "profile_dir": str(DEFAULT_PROFILE_DIR),
     "skip_if_checked_in": True,
@@ -116,6 +118,8 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def validate_config(config: dict[str, Any]) -> None:
+    if config.get("browser") not in BROWSERS:
+        raise ValueError("browser must be either 'chromium' or 'chrome'")
     if config.get("login_method") not in LOGIN_METHODS:
         raise ValueError("login_method must be either 'github' or 'password'")
     if config["login_method"] == "password":
@@ -190,6 +194,7 @@ def start_password_login(page, username: str, password: str) -> None:
 
 def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | None = None) -> int:
     try:
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -215,11 +220,26 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
         return 0
 
     with sync_playwright() as pw:
-        context = pw.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=config["headless"],
-            viewport={"width": 1280, "height": 900},
-        )
+        browser_options = {"channel": "chrome"} if config["browser"] == "chrome" else {}
+        try:
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=config["headless"],
+                viewport={"width": 1280, "height": 900},
+                **browser_options,
+            )
+        except PlaywrightError as exc:
+            if config["browser"] != "chrome":
+                raise
+            message = (
+                "無法啟動 Google Chrome。請確認已在預設位置安裝穩定版 Google Chrome，"
+                "且 profile_dir 是未被其他程序使用的自動化專用資料夾。"
+                "Linux 有頭模式需有圖形顯示環境；若要改用隨附 Chromium，請設定 browser=chromium。"
+            )
+            print(f"{message}\n{exc}", file=sys.stderr)
+            if notifier:
+                notifier.send("error", f"AgentRouter 簽到錯誤：{message}")
+            return 2
         page = context.pages[0] if context.pages else context.new_page()
         try:
             page.goto(LOGOUT_URL, wait_until="domcontentloaded", timeout=15_000)
@@ -285,6 +305,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--login-method", choices=sorted(LOGIN_METHODS), help="Override config login_method")
     parser.add_argument("--username", help="Override config username")
     parser.add_argument("--password", help="Override config password (environment variable is safer)")
+    parser.add_argument("--browser", choices=BROWSERS, help="Use bundled Chromium or installed Google Chrome")
     parser.add_argument("--profile-dir", type=Path, help="Override config profile_dir")
     parser.add_argument("--timeout", type=int, help="Override config timeout")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
@@ -321,6 +342,7 @@ def main() -> int:
             "password": args.password or os.environ.get("AGENTROUTER_PASSWORD"),
             "profile_dir": str(args.profile_dir) if args.profile_dir else None,
             "timeout": args.timeout,
+            "browser": args.browser,
             "headless": args.headless,
         }
         config.update({key: value for key, value in overrides.items() if value is not None})

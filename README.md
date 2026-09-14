@@ -29,6 +29,7 @@ run_checkin.bat --init-config
   "username": "your-email-or-username",
   "password": "your-password",
   "headless": true,
+  "browser": "chromium",
   "timeout": 60,
   "profile_dir": "~/.agentrouter-checkin/chromium-profile",
   "skip_if_checked_in": true,
@@ -62,6 +63,26 @@ run_checkin.bat
 
 啟動腳本會自動建立 Python 虛擬環境、安裝 Playwright 與 Chromium。帳密登入會自動提交；如果網站要求 CAPTCHA、2FA 或其他確認，請在可見瀏覽器中完成。
 
+## 使用電腦已安裝的 Google Chrome
+
+預設 `"browser": "chromium"` 使用 Playwright 隨附的 Chromium。若要使用電腦已安裝於預設位置的穩定版 Google Chrome，將 `config.json` 的 `browser` 改成 `"chrome"`，或以命令列覆寫：
+
+```bash
+# macOS；Linux 改用 ./run_checkin.sh，Windows 改用 run_checkin.bat
+./run_checkin.command --browser chrome --no-headless
+./run_checkin.command --browser chrome --headless
+```
+
+`browser` 與 `headless` 是獨立選項：前者選擇瀏覽器，後者決定是否顯示視窗。命令列優先於設定檔；舊設定檔未填 `browser` 時仍使用 Chromium。Chrome 啟動失敗會報錯，不會偷偷改用 Chromium。啟動腳本首次建立環境時仍會下載 Chromium，但 `--browser chrome` 實際執行的是已安裝的 Chrome。
+
+這會啟動由 Playwright 控制的 Chrome，不是接管已開啟的日常 Chrome 視窗。`profile_dir` 仍使用自動化專用資料夾，**不要指向日常 Chrome 的使用者資料目錄**。切換瀏覽器時建議另設 `"profile_dir": "~/.agentrouter-checkin/chrome-profile"`；新資料夾不會繼承舊登入狀態或每日去重記錄，可能需要重新登入，也可能在同一天再次執行。
+
+### 無頭 Chrome 的 User-Agent
+
+Google Chrome 也支援無頭模式，不是只有 Chromium 能無頭執行。現代 Chrome 的有頭與無頭模式共用瀏覽器實作，但預設 User-Agent 通常仍不同：有頭模式使用 `Chrome/<版本>`，無頭模式通常使用 `HeadlessChrome/<版本>`。實際值取決於版本與啟動設定；Chromium 也可能使用 `Chrome` 這個字樣，因此不能只靠它判斷品牌。
+
+使用正式 Chrome 或顯示視窗都不保證不被判定為自動化；網站也可能參考其他瀏覽器特徵與操作行為。本工具不偽造 User-Agent，也不繞過 CAPTCHA；需要驗證時請使用有頭模式手動完成。可參考 [Chrome Headless 說明](https://developer.chrome.com/docs/chromium/new-headless) 與 [Chromium User-Agent 實作](https://chromium.googlesource.com/chromium/src/+/main/components/embedder_support/user_agent_utils.cc)。
+
 ## 之後自動執行
 
 設定 `"headless": true` 後，可排程執行：
@@ -87,41 +108,55 @@ Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設
 chmod 600 ./config.json
 ```
 
-安裝目前使用者的 systemd timer（預設每天 08:00，使用設定檔中的時區）與 Telegram 指令服務：
+新版安裝器將 systemd timer（預設每天 08:00，使用設定檔中的時區）與 Telegram 指令服務安裝至 `/etc/systemd/system`，以系統層級的 `systemctl` 管理，不使用 `--user`。安裝需要 root 權限：
 
 ```bash
-./install_linux_systemd.sh
+sudo ./install_linux_systemd.sh
 ```
 
-也可以指定 systemd 行事曆時間與設定檔：
+`--run-as USER` 可指定服務的執行身分；未指定時使用 `SUDO_USER`，直接以 root 執行且沒有 `SUDO_USER` 時則使用目前的 root 身分。**建議以非 root 使用者執行無頭瀏覽器**：請從原本執行簽到的帳號使用 `sudo` 安裝，或明確指定原帳號（將 `originaluser` 換成實際帳號）：
 
 ```bash
-./install_linux_systemd.sh \
+sudo ./install_linux_systemd.sh --run-as originaluser
+```
+
+服務會明確設定所選使用者的 `User`、`Group` 與 `HOME`，讓 `~` 指向該使用者的家目錄。選對原帳號並沿用原設定檔與 `profile_dir`，才能保留原本的自動化專用瀏覽器 profile、登入狀態與每日去重記錄；不要改用日常 Chrome 的使用者資料目錄。請確認該帳號可讀取設定檔，並可存取程序目錄及寫入 profile／狀態檔。
+
+系統服務不會繼承舊 user service 或登入 shell 的環境變數；原本只透過環境變數提供的帳密不會自動帶入。請確認所選設定檔含有需要的登入憑證與 Bot Token，並以 `600` 權限保護、由執行帳號持有。Linux 通常沒有互動式瀏覽器，建議使用帳密登入；GitHub OAuth、CAPTCHA 或 2FA 需要先以原帳號、相同的專用 profile 在非 headless 模式完成登入。
+
+也可以指定 systemd 行事曆時間與設定檔（預設時區仍為 `Asia/Taipei`）：
+
+```bash
+sudo ./install_linux_systemd.sh \
+  --run-as originaluser \
   --on-calendar "*-*-* 07:30:00" \
   --config "$PWD/config.json"
 ```
 
-查看狀態或移除服務：
+#### 從舊版使用者服務遷移
+
+安裝器會檢查**所選執行使用者**的 `~/.config/systemd/user`，並公告偵測到的舊版 AutoCheckin units。遷移時會停止舊 timer、簽到與 Telegram 服務，移除已知的 unit 檔及啟用用的符號連結，再安裝系統層級服務。
+
+- 不會刪除設定檔、瀏覽器 profile 或狀態資料，也不會變更 lingering 設定或無關服務。
+- 若舊服務清理不完整，會中止遷移，避免新舊服務重複執行。特殊或無法辨識的 overrides 可能需要手動清理後再重新安裝。
+- 不會自動移除其他使用者的舊服務；請依原安裝帳號選擇 `--run-as`，並另行確認其他帳號沒有重複排程。
+
+#### 查看狀態與移除
+
+`--show` 只讀取系統層級狀態，不需要 `sudo`；`--remove` 需要 `sudo`，且**只移除系統層級 units**，不會清理舊版使用者 units：
 
 ```bash
 ./install_linux_systemd.sh --show
-./install_linux_systemd.sh --remove
+sudo ./install_linux_systemd.sh --remove
 ```
 
-簽到服務會使用同一個 Chromium profile 與每日去重記錄。可用 `journalctl --user -u autocheckin-checkin.service` 查看簽到記錄，Telegram 指令服務則可用 `journalctl --user -u autocheckin-telegram.service` 查看。Linux 通常沒有互動式瀏覽器，因此請使用帳密登入並將密碼與 Bot Token 保存在權限為 `600` 的設定檔中；GitHub OAuth、CAPTCHA 或 2FA 需要先以非 headless 模式完成登入。
-
-若要讓使用者登出後服務仍持續執行，安裝器會嘗試啟用 user lingering；若系統拒絕，請由管理員執行 `loginctl enable-linger "$USER"`。
-
-安裝器會自動啟用 lingering、啟動 `user@<UID>.service`，並建立 user bus，不需要手動設定環境變數。若系統政策阻止安裝器啟動 user manager，才需要從 SSH 或非登入 shell 手動執行：
+直接查看狀態與記錄時也使用系統層級指令，不加 `--user`（若沒有讀取系統 journal 的權限，請加上 `sudo`）：
 
 ```bash
-loginctl enable-linger "$USER"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-./install_linux_systemd.sh
+systemctl status autocheckin-checkin.timer autocheckin-checkin.service autocheckin-telegram.service
+journalctl -u autocheckin-checkin.service
+journalctl -u autocheckin-telegram.service
 ```
-
-請以安裝服務的同一個使用者執行，不要使用 `sudo`；安裝器也會嘗試透過 `--machine="$USER@.host" --user` 連線 user manager。
 
 ### Telegram Bot
 
@@ -161,6 +196,7 @@ Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知
 --login-method password      覆寫登入方式：github 或 password
 --username VALUE             覆寫帳號
 --password VALUE             覆寫密碼；建議使用 AGENTROUTER_PASSWORD 環境變數
+--browser chrome             選擇 chrome（已安裝）或 chromium（預設）
 --profile-dir PATH           覆寫瀏覽器登入狀態位置
 --timeout 300                登入等待秒數
 --headless / --no-headless   覆寫是否顯示瀏覽器
