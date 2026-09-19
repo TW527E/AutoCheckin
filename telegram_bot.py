@@ -2,14 +2,104 @@
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import json
 import os
+import re
+import socket
 import stat
 import time
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from typing import Any, Callable
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, getproxies
+
+TELEGRAM_API_HOST = "api.telegram.org"
+TELEGRAM_API_PORT = 443
+# The bot token is interpolated into the request path, so keep it free of URL
+# delimiters; a token containing "@" or "/" would move the request elsewhere.
+BOT_TOKEN_ALLOWED_CHARS = re.compile(r"\A[A-Za-z0-9_.:-]+\Z")
+
+
+def public_addresses(host: str, port: int = TELEGRAM_API_PORT) -> list[str]:
+    """Resolve host once and refuse anything outside the public internet."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"Cannot resolve {host}: {exc}") from exc
+    addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+    if not addresses:
+        raise ValueError(f"Refusing to contact {host}: it resolved to no address")
+    for address in addresses:
+        if not address.is_global:
+            raise ValueError(f"Refusing to contact {host}: it resolves to the non-public address {address}")
+    # IPv4 first, because it is the safer default where IPv6 is unroutable; the
+    # connection still falls back to the remaining validated addresses.
+    return sorted({str(address) for address in addresses}, key=lambda value: ":" in value)
+
+
+def proxy_configured() -> bool:
+    """True when a proxy carries the request, which makes it the egress point."""
+    proxies = getproxies()
+    return bool(proxies.get("https") or proxies.get("http"))
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection dialling addresses that were validated just before use.
+
+    Pinning the checked addresses means a later DNS answer cannot move the
+    connection between the check and the handshake, while the hostname still
+    drives SNI and certificate verification.
+    """
+
+    def __init__(self, host: str, addresses: list[str], **kwargs: Any):
+        super().__init__(host, **kwargs)
+        self.pinned_addresses = addresses
+
+    def connect(self) -> None:
+        last_error: OSError | None = None
+        for address in self.pinned_addresses:
+            try:
+                self.sock = socket.create_connection((address, self.port), self.timeout, self.source_address)
+            except OSError as exc:
+                last_error = exc
+                continue
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+            return
+        raise last_error if last_error is not None else OSError(f"No validated address for {self.host}")
+
+
+class PinnedHTTPSHandler(HTTPSHandler):
+    """HTTPS handler whose connections are validated and pinned."""
+
+    def https_open(self, req):
+        if proxy_configured():
+            # A proxy resolves the name itself and may legitimately be local, so
+            # pinning would break it; the URL checks still apply either way.
+            return super().https_open(req)
+        return self.do_open(self._pinned, req)
+
+    @staticmethod
+    def _pinned(host: str, **kwargs: Any) -> PinnedHTTPSConnection:
+        hostname = urlparse(f"//{host}").hostname or host
+        return PinnedHTTPSConnection(hostname, public_addresses(hostname), **kwargs)
+
+
+class SameHostRedirects(HTTPRedirectHandler):
+    """Refuse a redirect that would carry the request to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlparse(newurl).hostname != TELEGRAM_API_HOST:
+            raise HTTPError(newurl, code, "Refusing a redirect away from the Telegram API host", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def telegram_opener():
+    """Opener limited to HTTPS requests to the pinned Telegram Bot API host."""
+    return build_opener(PinnedHTTPSHandler(), SameHostRedirects())
+
 
 NOTIFICATION_TYPES = ("success", "error", "skipped")
 DEFAULT_NOTIFICATIONS = {"success": True, "error": True, "skipped": False}
@@ -19,6 +109,8 @@ NOTIFICATION_LABELS = {
     "skipped": "例行跳過",
 }
 BOT_COMMANDS = [
+    {"command": "checkin", "description": "立即執行簽到"},
+    {"command": "test", "description": "發送測試通知"},
     {"command": "toggle", "description": "切換通知設定"},
     {"command": "status", "description": "查看通知狀態"},
     {"command": "help", "description": "顯示指令說明"},
@@ -26,16 +118,28 @@ BOT_COMMANDS = [
 
 
 class TelegramNotifier:
-    def __init__(self, config: dict[str, Any], state_path: Path):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        state_path: Path,
+        checkin_trigger: Callable[[bool], str] | None = None,
+    ):
         telegram = config.get("telegram", {})
         if not isinstance(telegram, dict):
             telegram = {}
+        # Supplied by the runner so a Telegram command can start a check-in. It
+        # returns the text to answer with and must not block the listener.
+        self.checkin_trigger = checkin_trigger
         self.token = str(telegram.get("bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+        if self.token and not BOT_TOKEN_ALLOWED_CHARS.match(self.token):
+            raise ValueError(
+                "telegram.bot_token must not contain URL delimiters such as '/', '@', '?' or whitespace"
+            )
         self.chat_id = str(telegram.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
         self.admin_chat_ids = {str(value) for value in telegram.get("admin_chat_ids", [])}
         self.poll_enabled = bool(telegram.get("poll_commands", True))
         self.state_path = state_path.expanduser()
-        self.api_url = f"https://api.telegram.org/bot{self.token}"
+        self.opener = telegram_opener()
         self.state = self._load_state(telegram.get("notifications", {}))
 
     @property
@@ -75,12 +179,19 @@ class TelegramNotifier:
 
     def _request(self, method: str, payload: dict[str, Any], timeout: int = 15) -> Any:
         body = urlencode({key: json.dumps(value) if isinstance(value, (list, dict)) else value for key, value in payload.items()}).encode()
+        # The token is percent-encoded so it stays inside its own path segment
+        # (":" stays literal because Telegram expects the raw "id:secret" form),
+        # and the result is checked against the one host this client may reach.
+        url = f"https://{TELEGRAM_API_HOST}/bot{quote(self.token, safe=':')}/{method}"
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != TELEGRAM_API_HOST:
+            raise ValueError(f"Refusing to send a Telegram request to {url}")
         request = Request(
-            f"{self.api_url}/{method}",
+            url,
             data=body,
             headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "AutoCheckin/1.0"},
         )
-        with urlopen(request, timeout=timeout) as response:
+        with self.opener.open(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
         if not result.get("ok"):
             raise RuntimeError(result.get("description", f"Telegram API call failed: {method}"))
@@ -148,8 +259,48 @@ class TelegramNotifier:
             self._show_notification_menu(source_chat_id)
         elif command in {"/status", "/notify_status", "/notifications"}:
             self._show_notification_menu(source_chat_id)
+        elif command == "/checkin":
+            self._handle_checkin_request(source_chat_id, parts[1:])
+        elif command in {"/test", "/ping"}:
+            self._send_test_notification(source_chat_id)
         elif command in {"/start", "/help"}:
             self._reply(source_chat_id, self.help_text())
+
+    def _handle_checkin_request(self, chat_id: str, arguments: list[str]) -> None:
+        if self.checkin_trigger is None:
+            self._reply(chat_id, "此服務未啟用簽到觸發功能，請直接執行簽到程式。")
+            return
+        force = False
+        for argument in arguments:
+            if argument.lower() in {"force", "--force", "-f"}:
+                force = True
+            else:
+                self._reply(chat_id, f"未知的參數：{argument}\n用法：/checkin 或 /checkin force")
+                return
+        try:
+            self._reply(chat_id, self.checkin_trigger(force))
+        except Exception as exc:
+            self._reply(chat_id, f"❌ 無法啟動簽到：{exc}")
+
+    def _send_test_notification(self, chat_id: str) -> None:
+        # Delivered regardless of the notification toggles, because the point is
+        # to prove the delivery path works.
+        message = self.test_message()
+        if chat_id != self.chat_id:
+            self._reply(self.chat_id, message)
+        self._reply(chat_id, message)
+
+    def test_message(self) -> str:
+        enabled = [
+            NOTIFICATION_LABELS[name]
+            for name in NOTIFICATION_TYPES
+            if self.state["notifications"].get(name, False)
+        ]
+        return (
+            "🔔 Telegram 通知測試\n"
+            "看到這則訊息代表 Bot 可以正常發送通知。\n"
+            f"目前已開啟的通知：{'、'.join(enabled) if enabled else '（全部關閉）'}"
+        )
 
     def _show_notification_menu(self, chat_id: str) -> None:
         self._reply(chat_id, "通知狀態（點擊按鈕切換）：", self._notification_keyboard())
@@ -255,7 +406,15 @@ class TelegramNotifier:
         )
 
     def help_text(self) -> str:
-        return "通知設定指令：\n/toggle 顯示並切換通知\n/status 顯示目前狀態\n/help 顯示此說明"
+        return (
+            "指令說明：\n"
+            "/checkin 立即執行簽到（今日已簽到會跳過）\n"
+            "/checkin force 忽略今日紀錄，強制重新簽到\n"
+            "/test 發送測試通知\n"
+            "/toggle 顯示並切換通知\n"
+            "/status 顯示目前狀態\n"
+            "/help 顯示此說明"
+        )
 
     def listen_forever(self) -> None:
         if not self.configured:

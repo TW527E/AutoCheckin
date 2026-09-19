@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,13 +18,82 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram_bot import NOTIFICATION_TYPES, TelegramNotifier
 
-LOGIN_URL = "https://agentrouter.org/login"
-LOGOUT_URL = "https://agentrouter.org/api/user/logout"
+SITE_ORIGIN = "https://agentrouter.org"
+LOGIN_URL = f"{SITE_ORIGIN}/login"
+LOGOUT_URL = f"{SITE_ORIGIN}/api/user/logout"
 PROGRAM_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROGRAM_DIR / "config.json"
 DEFAULT_PROFILE_DIR = Path.home() / ".agentrouter-checkin" / "chromium-profile"
 LOGIN_METHODS = {"github", "password"}
 BROWSERS = ("chromium", "chrome")
+# AgentRouter runs new-api, which reports quota in units of quota_per_unit at
+# /api/status. The default matches the value that deployment publishes.
+DEFAULT_QUOTA_PER_UNIT = 500_000
+
+# Reads the signed-in account through the site's own JSON API so the browser
+# session cookies are reused. Both endpoints are the ones the web frontend calls.
+BALANCE_SCRIPT = """
+async () => {
+  const readUserId = () => {
+    try {
+      const stored = localStorage.getItem("user");
+      if (!stored) {
+        return null;
+      }
+      const id = Number(JSON.parse(stored).id);
+      return Number.isFinite(id) ? id : null;
+    } catch (error) {
+      return null;
+    }
+  };
+  const userId = await (async () => {
+    const deadline = Date.now() + 5000;
+    let id = readUserId();
+    while (id === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      id = readUserId();
+    }
+    return id;
+  })();
+  const request = async (path) => {
+    const headers = { Accept: "application/json" };
+    if (userId !== null) {
+      // The web frontend signs every dashboard request with the account id and
+      // the server rejects the account endpoints without it.
+      headers["New-API-User"] = String(userId);
+    }
+    const response = await fetch(path, { headers, credentials: "same-origin" });
+    if (!response.ok) {
+      throw new Error(path + " responded with " + response.status);
+    }
+    return response.json();
+  };
+  const account = await request("/api/user/self");
+  if (!account || account.success !== true || !account.data) {
+    throw new Error((account && account.message) || "/api/user/self returned no account data");
+  }
+  const quota = Number(account.data.quota);
+  if (!Number.isFinite(quota)) {
+    throw new Error("/api/user/self returned no numeric quota");
+  }
+  let quotaPerUnit = null;
+  let displayInCurrency = null;
+  try {
+    const status = await request("/api/status");
+    const data = (status && status.data) || {};
+    const perUnit = Number(data.quota_per_unit);
+    if (Number.isFinite(perUnit) && perUnit > 0) {
+      quotaPerUnit = perUnit;
+    }
+    if (typeof data.display_in_currency === "boolean") {
+      displayInCurrency = data.display_in_currency;
+    }
+  } catch (error) {
+    // The unit is only used for formatting; the caller falls back to a default.
+  }
+  return { quota: quota, quota_per_unit: quotaPerUnit, display_in_currency: displayInCurrency };
+}
+"""
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "login_method": "github",
@@ -72,7 +142,7 @@ def login_controls_visible(page) -> bool:
 
 def is_authenticated_page(page) -> bool:
     url = page.url or ""
-    if not url.startswith("https://agentrouter.org"):
+    if not url.startswith(SITE_ORIGIN):
         return False
     if "/login" not in url:
         return True
@@ -94,6 +164,92 @@ def wait_until_signed_in(page, timeout_seconds: int) -> bool:
             authenticated_checks = 0
         time.sleep(0.5)
     return False
+
+
+def fetch_balance(page) -> dict[str, Any] | None:
+    """Read the quota of the signed-in account, or None when it is unavailable."""
+    if not (page.url or "").startswith(SITE_ORIGIN):
+        return None
+    try:
+        result = page.evaluate(BALANCE_SCRIPT)
+    except Exception as exc:
+        print(f"Warning: could not read the account balance: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(result, dict):
+        return None
+    quota = result.get("quota")
+    if isinstance(quota, bool) or not isinstance(quota, (int, float)):
+        print("Warning: the account balance API returned no usable quota.", file=sys.stderr)
+        return None
+    quota_per_unit = result.get("quota_per_unit")
+    if isinstance(quota_per_unit, bool) or not isinstance(quota_per_unit, (int, float)) or quota_per_unit <= 0:
+        quota_per_unit = DEFAULT_QUOTA_PER_UNIT
+    display_in_currency = result.get("display_in_currency")
+    if not isinstance(display_in_currency, bool):
+        display_in_currency = True
+    return {"quota": quota, "quota_per_unit": quota_per_unit, "display_in_currency": display_in_currency}
+
+
+def format_quota(quota: float, quota_per_unit: float, display_in_currency: bool) -> str:
+    """Format a raw quota exactly like the AgentRouter web frontend does."""
+    if display_in_currency and quota_per_unit > 0:
+        return f"${quota / quota_per_unit:.2f}"
+    for threshold, unit, suffix in ((1e9, 1e9, "B"), (1e6, 1e6, "M"), (1e4, 1e3, "k")):
+        if quota >= threshold:
+            return f"{quota / unit:.1f}{suffix}"
+    return f"{quota:.0f}"
+
+
+def read_balance(page) -> str | None:
+    """Return the current balance as displayed by the site, or None on failure."""
+    balance = fetch_balance(page)
+    if balance is None:
+        return None
+    return format_quota(balance["quota"], balance["quota_per_unit"], balance["display_in_currency"])
+
+
+def checkin_state_path(config: dict[str, Any]) -> Path:
+    """File recording the date of the last successful sign-in."""
+    return Path(str(config["profile_dir"])).expanduser() / "last_checkin_date.txt"
+
+
+def read_checkin_state(config: dict[str, Any]) -> str | None:
+    """Date recorded by the last successful sign-in, or None when there is none."""
+    state_file = checkin_state_path(config)
+    if not state_file.exists():
+        return None
+    return state_file.read_text(encoding="utf-8").strip() or None
+
+
+class CheckinTrigger:
+    """Runs a check-in on behalf of a Telegram command.
+
+    The run happens on a background thread so the command listener keeps
+    answering, and it reports its result through the usual notification.
+    """
+
+    def __init__(self, config: dict[str, Any], state_path: Path):
+        self.config = config
+        self.state_path = state_path
+        self.thread: threading.Thread | None = None
+
+    def __call__(self, force: bool) -> str:
+        if self.thread is not None and self.thread.is_alive():
+            return "⏳ 上一次簽到仍在執行中，請稍候再試。"
+        today = datetime.now(ZoneInfo(self.config["timezone"])).date().isoformat()
+        if self.config["skip_if_checked_in"] and not force and read_checkin_state(self.config) == today:
+            return f"今日（{today}）已經簽到，未重複登入。\n若要重試請用 /checkin force。"
+        self.thread = threading.Thread(target=self._run, args=(force,), daemon=True)
+        self.thread.start()
+        return "🚀 已開始執行簽到，結果會以簽到通知回報。"
+
+    def _run(self, force: bool) -> None:
+        try:
+            # A separate notifier keeps this run out of the listener's polling
+            # state; it only sends the notification for this check-in.
+            checkin(self.config, force, TelegramNotifier(self.config, self.state_path))
+        except Exception as exc:
+            print(f"Triggered check-in failed: {exc}", file=sys.stderr)
 
 
 def write_example_config(path: Path) -> None:
@@ -208,14 +364,9 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
 
     profile_dir = Path(str(config["profile_dir"])).expanduser()
     profile_dir.mkdir(parents=True, exist_ok=True)
-    state_file = profile_dir / "last_checkin_date.txt"
+    state_file = checkin_state_path(config)
     today = datetime.now(ZoneInfo(config["timezone"])).date().isoformat()
-    if (
-        config["skip_if_checked_in"]
-        and not force
-        and state_file.exists()
-        and state_file.read_text(encoding="utf-8").strip() == today
-    ):
+    if config["skip_if_checked_in"] and not force and read_checkin_state(config) == today:
         print(f"Already checked in today ({today}); skipping duplicate login.")
         return 0
 
@@ -249,8 +400,15 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
         if not is_login_page(page):
             print(f"Login page redirected to an authenticated page: {page.url}")
             state_file.write_text(today + "\n", encoding="utf-8")
+            balance = read_balance(page)
+            if balance:
+                print(f"Account balance: {balance}")
             if notifier:
-                notifier.send("success", f"AgentRouter 簽到成功（既有登入狀態）。\n日期：{today}\n網址：{page.url}")
+                balance_line = f"\n餘額：{balance}" if balance else ""
+                notifier.send(
+                    "success",
+                    f"AgentRouter 簽到成功（既有登入狀態）。\n日期：{today}\n網址：{page.url}{balance_line}",
+                )
             context.close()
             return 0
         try:
@@ -287,8 +445,16 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
         page.wait_for_timeout(1500)
         state_file.write_text(today + "\n", encoding="utf-8")
         print(f"Signed in successfully with {config['login_method']}: {page.url}")
+        balance = read_balance(page)
+        if balance:
+            print(f"Account balance: {balance}")
         if notifier:
-            notifier.send("success", f"AgentRouter 簽到成功。\n日期：{today}\n登入方式：{config['login_method']}\n網址：{page.url}")
+            balance_line = f"\n餘額：{balance}" if balance else ""
+            notifier.send(
+                "success",
+                f"AgentRouter 簽到成功。\n日期：{today}"
+                f"\n登入方式：{config['login_method']}\n網址：{page.url}{balance_line}",
+            )
         context.close()
         return 0
 
@@ -346,7 +512,8 @@ def main() -> int:
             "headless": args.headless,
         }
         config.update({key: value for key, value in overrides.items() if value is not None})
-        notifier = TelegramNotifier(config, config_path.parent / "telegram_state.json")
+        state_path = config_path.parent / "telegram_state.json"
+        notifier = TelegramNotifier(config, state_path, CheckinTrigger(config, state_path))
         validate_config(config)
     except ValueError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)

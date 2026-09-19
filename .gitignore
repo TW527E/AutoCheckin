@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 config.json
+telegram_state.json
+
+# Browser profile and check-in state, holding the signed-in session.
+.agentrouter-checkin/
+
+# Local security-scanner state, including its snapshots of the working tree.
+.mimosa/
