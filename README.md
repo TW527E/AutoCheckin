@@ -166,6 +166,7 @@ journalctl -u autocheckin-telegram.service
 "telegram": {
   "bot_token": "123456:replace-with-your-token",
   "chat_id": "-1001234567890",
+  "error_chat_id": "",
   "admin_chat_ids": [],
   "poll_commands": true,
   "notifications": {
@@ -176,7 +177,7 @@ journalctl -u autocheckin-telegram.service
 }
 ```
 
-Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知實際簽到成功，訊息以 `✅` 開頭；`error` 會通知錯誤，訊息以 `❌` 開頭。例行的「今日已簽到」跳過不會發送通知。Telegram 指令服務啟動時會自動註冊指令，因此在聊天輸入 `/` 就能看到指令與中文說明：
+Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知實際簽到成功，訊息以 `✅` 開頭；`error` 會通知錯誤，訊息以 `❌` 開頭。例行的「今日已簽到」跳過不會發送通知。`error_chat_id` 選填：若填入某個 Chat ID（例如你和 Bot 的私人聊天，先用 `/checkin` 之類指令對 Bot 傳訊或看 `admin_chat_ids` 內的個人 ID），錯誤與簽到失敗通知會改送到該聊天，其餘通知仍送往 `chat_id`；留空時錯誤通知照舊送往 `chat_id`。也可用環境變數 `TELEGRAM_ERROR_CHAT_ID` 覆寫。Telegram 指令服務啟動時會自動註冊指令，因此在聊天輸入 `/` 就能看到指令與中文說明：
 
 ```text
 /checkin   立即執行簽到

@@ -136,6 +136,9 @@ class TelegramNotifier:
                 "telegram.bot_token must not contain URL delimiters such as '/', '@', '?' or whitespace"
             )
         self.chat_id = str(telegram.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        # Errors and check-in failures go here instead of the main chat, so a
+        # noisy group stays quiet and problems reach the operator's own DM.
+        self.error_chat_id = str(telegram.get("error_chat_id") or os.environ.get("TELEGRAM_ERROR_CHAT_ID") or "").strip()
         self.admin_chat_ids = {str(value) for value in telegram.get("admin_chat_ids", [])}
         self.poll_enabled = bool(telegram.get("poll_commands", True))
         self.state_path = state_path.expanduser()
@@ -205,8 +208,9 @@ class TelegramNotifier:
         prefix = {"success": "✅", "error": "❌"}.get(notification_type)
         if prefix:
             text = f"{prefix} {text}"
+        target_chat_id = self.error_chat_id if notification_type == "error" and self.error_chat_id else self.chat_id
         try:
-            self._request("sendMessage", {"chat_id": self.chat_id, "text": text})
+            self._request("sendMessage", {"chat_id": target_chat_id, "text": text})
             return True
         except Exception as exc:
             print(f"Warning: Telegram notification failed: {exc}")

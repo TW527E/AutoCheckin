@@ -108,6 +108,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram": {
         "bot_token": "",
         "chat_id": "",
+        "error_chat_id": "",
         "admin_chat_ids": [],
         "poll_commands": True,
         "notifications": {
@@ -302,6 +303,8 @@ def validate_config(config: dict[str, Any]) -> None:
     chat_id = str(telegram.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     if token and not chat_id:
         raise ValueError("telegram.chat_id is required when a Telegram bot token is configured")
+    if "error_chat_id" in telegram and not isinstance(telegram["error_chat_id"], (str, int)):
+        raise ValueError("telegram.error_chat_id must be a chat id string")
     if not isinstance(telegram.get("admin_chat_ids", []), list):
         raise ValueError("telegram.admin_chat_ids must be a list")
     if not isinstance(telegram.get("poll_commands", True), bool):

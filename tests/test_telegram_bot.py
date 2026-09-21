@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from urllib.request import Request
 
 import telegram_bot
@@ -52,10 +52,14 @@ class NotifierTestCase(unittest.TestCase):
         self.addCleanup(self._temp.cleanup)
         self.directory = self._temp.name
 
-    def make_notifier(self, token: str = TOKEN, directory: str | None = None):
-        config = {"telegram": {"bot_token": token, "chat_id": "-100123"}}
+    def make_notifier(self, token: str = TOKEN, directory: str | None = None, telegram: dict | None = None):
+        config = {"telegram": {"bot_token": token, "chat_id": "-100123", **(telegram or {})}}
         state_path = Path(directory or self.directory) / "telegram_state.json"
         return telegram_bot.TelegramNotifier(config, state_path)
+
+    @staticmethod
+    def sent_chat_id(request) -> str:
+        return dict(parse_qsl(request.data.decode()))["chat_id"]
 
 
 class TokenValidationTests(NotifierTestCase):
@@ -212,6 +216,29 @@ class RedirectTests(unittest.TestCase):
             self.request(), None, 302, "Found", {}, f"https://api.telegram.org/bot{TOKEN}/getMe"
         )
         self.assertEqual(redirect.full_url, f"https://api.telegram.org/bot{TOKEN}/getMe")
+
+
+class ErrorRoutingTests(NotifierTestCase):
+    def test_errors_route_to_the_error_chat_when_set(self):
+        notifier = self.make_notifier(telegram={"error_chat_id": "555"})
+        opener = FakeOpener()
+        notifier.opener = opener
+        self.assertTrue(notifier.send("error", "簽到失敗"))
+        self.assertEqual(self.sent_chat_id(opener.requests[0]), "555")
+
+    def test_success_still_goes_to_the_main_chat_when_error_chat_is_set(self):
+        notifier = self.make_notifier(telegram={"error_chat_id": "555"})
+        opener = FakeOpener()
+        notifier.opener = opener
+        self.assertTrue(notifier.send("success", "簽到成功"))
+        self.assertEqual(self.sent_chat_id(opener.requests[0]), "-100123")
+
+    def test_errors_fall_back_to_the_main_chat_without_an_error_chat(self):
+        notifier = self.make_notifier()
+        opener = FakeOpener()
+        notifier.opener = opener
+        self.assertTrue(notifier.send("error", "簽到失敗"))
+        self.assertEqual(self.sent_chat_id(opener.requests[0]), "-100123")
 
 
 class NotifierBehaviourTests(NotifierTestCase):
