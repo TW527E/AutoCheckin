@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from telegram_bot import NOTIFICATION_TYPES, TelegramNotifier
+from telegram_bot import DEFAULT_NOTIFICATIONS, NOTIFICATION_TYPES, TelegramNotifier
 
 SITE_ORIGIN = "https://agentrouter.org"
 LOGIN_URL = f"{SITE_ORIGIN}/login"
@@ -111,11 +111,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "error_chat_id": "",
         "admin_chat_ids": [],
         "poll_commands": True,
-        "notifications": {
-            "success": True,
-            "error": True,
-            "skipped": False,
-        },
+        "notifications": dict(DEFAULT_NOTIFICATIONS),
     },
 }
 

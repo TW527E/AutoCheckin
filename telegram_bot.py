@@ -261,7 +261,7 @@ class TelegramNotifier:
         command = parts[0].split("@", 1)[0].lower()
         if command == "/toggle":
             self._show_notification_menu(source_chat_id)
-        elif command in {"/status", "/notify_status", "/notifications"}:
+        elif command == "/status":
             self._show_notification_menu(source_chat_id)
         elif command == "/checkin":
             self._handle_checkin_request(source_chat_id, parts[1:])
@@ -401,13 +401,6 @@ class TelegramNotifier:
             self._request("sendMessage", payload)
         except Exception as exc:
             print(f"Warning: Telegram command reply failed: {exc}")
-
-    def status_text(self) -> str:
-        enabled = self.state["notifications"]
-        return "通知狀態：\n" + "\n".join(
-            f"{NOTIFICATION_LABELS[name]}：{'開啟' if enabled.get(name, False) else '關閉'}"
-            for name in NOTIFICATION_TYPES
-        )
 
     def help_text(self) -> str:
         return (
