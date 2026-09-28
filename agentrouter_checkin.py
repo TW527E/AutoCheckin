@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from telegram_bot import DEFAULT_NOTIFICATIONS, NOTIFICATION_TYPES, TelegramNotifier
+from telegram_bot import DEFAULT_NOTIFICATIONS, TelegramNotifier
 
 SITE_ORIGIN = "https://agentrouter.org"
 LOGIN_URL = f"{SITE_ORIGIN}/login"
@@ -36,25 +36,20 @@ BALANCE_SCRIPT = """
 async () => {
   const readUserId = () => {
     try {
-      const stored = localStorage.getItem("user");
-      if (!stored) {
-        return null;
-      }
-      const id = Number(JSON.parse(stored).id);
+      const id = Number(JSON.parse(localStorage.getItem("user")).id);
       return Number.isFinite(id) ? id : null;
     } catch (error) {
       return null;
     }
   };
-  const userId = await (async () => {
-    const deadline = Date.now() + 5000;
-    let id = readUserId();
-    while (id === null && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      id = readUserId();
-    }
-    return id;
-  })();
+  // The dashboard is a single-page app, so the account may land in localStorage
+  // a moment after the navigation the caller waited for.
+  const deadline = Date.now() + 5000;
+  let userId = readUserId();
+  while (userId === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    userId = readUserId();
+  }
   const request = async (path) => {
     const headers = { Accept: "application/json" };
     if (userId !== null) {
@@ -110,14 +105,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "chat_id": "",
         "error_chat_id": "",
         "admin_chat_ids": [],
-        "poll_commands": True,
         "notifications": dict(DEFAULT_NOTIFICATIONS),
     },
 }
-
-
-def is_login_page(page) -> bool:
-    return "/login" in (page.url or "")
 
 
 def login_controls_visible(page) -> bool:
@@ -163,8 +153,18 @@ def wait_until_signed_in(page, timeout_seconds: int) -> bool:
     return False
 
 
-def fetch_balance(page) -> dict[str, Any] | None:
-    """Read the quota of the signed-in account, or None when it is unavailable."""
+def format_quota(quota: float, quota_per_unit: float, display_in_currency: bool) -> str:
+    """Format a raw quota exactly like the AgentRouter web frontend does."""
+    if display_in_currency and quota_per_unit > 0:
+        return f"${quota / quota_per_unit:.2f}"
+    for threshold, unit, suffix in ((1e9, 1e9, "B"), (1e6, 1e6, "M"), (1e4, 1e3, "k")):
+        if quota >= threshold:
+            return f"{quota / unit:.1f}{suffix}"
+    return f"{quota:.0f}"
+
+
+def read_balance(page) -> str | None:
+    """Return the current balance as displayed by the site, or None on failure."""
     if not (page.url or "").startswith(SITE_ORIGIN):
         return None
     try:
@@ -181,28 +181,7 @@ def fetch_balance(page) -> dict[str, Any] | None:
     quota_per_unit = result.get("quota_per_unit")
     if isinstance(quota_per_unit, bool) or not isinstance(quota_per_unit, (int, float)) or quota_per_unit <= 0:
         quota_per_unit = DEFAULT_QUOTA_PER_UNIT
-    display_in_currency = result.get("display_in_currency")
-    if not isinstance(display_in_currency, bool):
-        display_in_currency = True
-    return {"quota": quota, "quota_per_unit": quota_per_unit, "display_in_currency": display_in_currency}
-
-
-def format_quota(quota: float, quota_per_unit: float, display_in_currency: bool) -> str:
-    """Format a raw quota exactly like the AgentRouter web frontend does."""
-    if display_in_currency and quota_per_unit > 0:
-        return f"${quota / quota_per_unit:.2f}"
-    for threshold, unit, suffix in ((1e9, 1e9, "B"), (1e6, 1e6, "M"), (1e4, 1e3, "k")):
-        if quota >= threshold:
-            return f"{quota / unit:.1f}{suffix}"
-    return f"{quota:.0f}"
-
-
-def read_balance(page) -> str | None:
-    """Return the current balance as displayed by the site, or None on failure."""
-    balance = fetch_balance(page)
-    if balance is None:
-        return None
-    return format_quota(balance["quota"], balance["quota_per_unit"], balance["display_in_currency"])
+    return format_quota(quota, quota_per_unit, result.get("display_in_currency") is not False)
 
 
 def checkin_state_path(config: dict[str, Any]) -> Path:
@@ -289,9 +268,6 @@ def validate_config(config: dict[str, Any]) -> None:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(f"timezone must be a valid IANA timezone name: {timezone}") from exc
-    for key in ("headless", "skip_if_checked_in"):
-        if not isinstance(config.get(key), bool):
-            raise ValueError(f"{key} must be true or false")
     telegram = config.get("telegram", {})
     if not isinstance(telegram, dict):
         raise ValueError("telegram must be an object")
@@ -299,30 +275,6 @@ def validate_config(config: dict[str, Any]) -> None:
     chat_id = str(telegram.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     if token and not chat_id:
         raise ValueError("telegram.chat_id is required when a Telegram bot token is configured")
-    if "error_chat_id" in telegram and not isinstance(telegram["error_chat_id"], (str, int)):
-        raise ValueError("telegram.error_chat_id must be a chat id string")
-    if not isinstance(telegram.get("admin_chat_ids", []), list):
-        raise ValueError("telegram.admin_chat_ids must be a list")
-    if not isinstance(telegram.get("poll_commands", True), bool):
-        raise ValueError("telegram.poll_commands must be true or false")
-    notifications = telegram.get("notifications", {})
-    if not isinstance(notifications, dict):
-        raise ValueError("telegram.notifications must be an object")
-    for key in (*NOTIFICATION_TYPES, "skipped"):
-        if key in notifications and not isinstance(notifications[key], bool):
-            raise ValueError(f"telegram.notifications.{key} must be true or false")
-
-
-def warn_about_config_permissions(path: Path, config: dict[str, Any]) -> None:
-    telegram = config.get("telegram", {})
-    has_token = isinstance(telegram, dict) and bool(telegram.get("bot_token"))
-    if os.name == "nt" or not path.exists() or not (config.get("password") or has_token):
-        return
-    if path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        print(
-            f"Warning: {path} contains credentials and is accessible by other users. Run: chmod 600 {path}",
-            file=sys.stderr,
-        )
 
 
 def click_button(page, text: str, timeout_ms: int = 15_000) -> None:
@@ -396,7 +348,7 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
         except Exception:
             pass
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        if not is_login_page(page):
+        if "/login" not in (page.url or ""):
             print(f"Login page redirected to an authenticated page: {page.url}")
             state_file.write_text(today + "\n", encoding="utf-8")
             balance = read_balance(page)
@@ -467,12 +419,7 @@ def parse_args() -> argparse.Namespace:
         help=f"JSON config file (default: {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument("--init-config", action="store_true", help="Create a config file and exit")
-    parser.add_argument("--login-method", choices=sorted(LOGIN_METHODS), help="Override config login_method")
-    parser.add_argument("--username", help="Override config username")
-    parser.add_argument("--password", help="Override config password (environment variable is safer)")
     parser.add_argument("--browser", choices=BROWSERS, help="Use bundled Chromium or installed Google Chrome")
-    parser.add_argument("--profile-dir", type=Path, help="Override config profile_dir")
-    parser.add_argument("--timeout", type=int, help="Override config timeout")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--force", action="store_true", help="Run even if this machine already checked in today")
     parser.add_argument("--telegram-listen", action="store_true", help="Run the Telegram command listener continuously")
@@ -493,20 +440,9 @@ def main() -> int:
     notifier: TelegramNotifier | None = None
     try:
         config = load_config(config_path)
-        telegram = config.setdefault("telegram", {})
-        if args.telegram_listen and not isinstance(telegram, dict):
-            raise ValueError("telegram must be an object")
-        if isinstance(telegram, dict):
-            if os.environ.get("TELEGRAM_BOT_TOKEN"):
-                telegram["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
-            if os.environ.get("TELEGRAM_CHAT_ID"):
-                telegram["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
         overrides = {
-            "login_method": args.login_method,
-            "username": args.username or os.environ.get("AGENTROUTER_USERNAME"),
-            "password": args.password or os.environ.get("AGENTROUTER_PASSWORD"),
-            "profile_dir": str(args.profile_dir) if args.profile_dir else None,
-            "timeout": args.timeout,
+            "username": os.environ.get("AGENTROUTER_USERNAME"),
+            "password": os.environ.get("AGENTROUTER_PASSWORD"),
             "browser": args.browser,
             "headless": args.headless,
         }
@@ -519,7 +455,6 @@ def main() -> int:
         if notifier:
             notifier.send("error", f"AgentRouter 簽到設定錯誤：{exc}")
         return 2
-    warn_about_config_permissions(config_path, config)
     assert notifier is not None
     if args.telegram_listen:
         try:

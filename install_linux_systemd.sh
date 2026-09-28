@@ -17,11 +17,13 @@ usage() {
     printf '%s\n' \
         'Usage: sudo ./install_linux_systemd.sh [options]' \
         '' \
-        'Install system-level AutoCheckin services and migrate the selected user’s legacy units.' \
+        'Install system-level AutoCheckin services.' \
+        'Upgrading from the old --user units? Disable them first, as that account:' \
+        '  systemctl --user disable --now autocheckin-checkin.timer autocheckin-telegram.service' \
         '' \
         '  --on-calendar VALUE  systemd calendar expression (default: *-*-* 08:00:00)' \
         '  --config PATH        Config file used by the services' \
-        '  --run-as USER        Runtime / migration account (default: SUDO_USER or current user)' \
+        '  --run-as USER        Runtime account (default: SUDO_USER or current user)' \
         '  --remove             Stop and remove system services only (requires root)' \
         '  --show               Show system service and timer status (read-only)' \
         '  -h, --help           Show this help'
@@ -133,58 +135,6 @@ TIMEZONE=${CONFIG_SETTINGS%$'\n'*}
 TELEGRAM_ENABLED=${CONFIG_SETTINGS##*$'\n'}
 systemd-analyze calendar "$ON_CALENDAR $TIMEZONE" >/dev/null || fail 'Invalid calendar; existing services were not changed.'
 
-LEGACY_DIR="$RUN_HOME/.config/systemd/user"
-inspect_units "$LEGACY_DIR"
-LEGACY_FILES=()
-shopt -s nullglob
-for unit in "${UNITS[@]}"; do
-    if [ -e "$LEGACY_DIR/$unit" ]; then LEGACY_FILES+=("$LEGACY_DIR/$unit"); fi
-    for link in "$LEGACY_DIR"/*.wants/"$unit" "$LEGACY_DIR"/*.requires/"$unit"; do
-        [ -L "$link" ] && [ "$(readlink -m -- "$link")" = "$LEGACY_DIR/$unit" ] \
-            || fail "Unrecognized legacy enablement entry: $link"
-        LEGACY_FILES+=("$link")
-    done
-done
-
-USER_MANAGER_STATE=$(systemctl show "user@$RUN_UID.service" --property=ActiveState --value) \
-    || fail 'Cannot determine whether the legacy user manager is running.'
-USER_CONNECTED=false
-LEGACY_LOADED=()
-userctl() {
-    if [ "$USER_TRANSPORT" = machine ]; then
-        systemctl --machine="$RUN_AS@.host" --user "$@"
-    else
-        runuser -u "$RUN_AS" -- env XDG_RUNTIME_DIR="/run/user/$RUN_UID" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$RUN_UID/bus" systemctl --user "$@"
-    fi
-}
-case "$USER_MANAGER_STATE" in
-    inactive|failed) ;;
-    active)
-        USER_TRANSPORT=machine
-        if userctl show-environment >/dev/null 2>&1; then
-            USER_CONNECTED=true
-        else
-            USER_TRANSPORT=bus
-            userctl show-environment >/dev/null 2>&1 \
-                || fail "Cannot inspect running user services for $RUN_AS; migration stopped to avoid duplicate jobs."
-            USER_CONNECTED=true
-        fi
-        for unit in "${UNITS[@]}"; do
-            state=$(userctl show "$unit" --property=LoadState --value) || fail "Cannot inspect legacy $unit"
-            if [ "$state" != not-found ]; then
-                fragment=$(userctl show "$unit" --property=FragmentPath --value) || fail "Cannot inspect legacy path for $unit"
-                [[ -z "$fragment" || "$fragment" = "$LEGACY_DIR/$unit" ]] \
-                    || fail "Legacy $unit is loaded from $fragment; review it manually before migration."
-                dropins=$(userctl show "$unit" --property=DropInPaths --value) || fail "Cannot inspect legacy overrides for $unit"
-                [ -z "$dropins" ] || fail "Legacy $unit has custom overrides; review them before migration."
-                LEGACY_LOADED+=("$unit")
-            fi
-        done
-        ;;
-    *) fail "User manager is in state '$USER_MANAGER_STATE'; retry after it settles." ;;
-esac
-
 systemd_quote() {
     local value=$1
     value=${value//\\/\\\\}
@@ -225,23 +175,6 @@ printf '%s\n' \
     "ExecStart=$quoted_runner --telegram-listen --config $quoted_config" \
     'Restart=always' 'RestartSec=10' '' '[Install]' 'WantedBy=multi-user.target' \
     > "$STAGING/$TELEGRAM_SERVICE"
-
-if ((${#LEGACY_FILES[@]} || ${#LEGACY_LOADED[@]})); then
-    printf 'Detected legacy --user AutoCheckin services for %s. Stopping and removing them to upgrade to system services.\n' "$RUN_AS"
-    if [ "$USER_CONNECTED" = true ] && ((${#LEGACY_LOADED[@]})); then
-        for unit in "${LEGACY_LOADED[@]}"; do
-            userctl stop "$unit" || fail "Could not stop legacy $unit; system services were not started."
-            state=$(userctl show "$unit" --property=ActiveState --value) || fail "Cannot verify legacy $unit stopped."
-            [[ "$state" = inactive || "$state" = failed ]] || fail "Legacy $unit is still $state; migration stopped."
-        done
-    fi
-    # Remove only pre-inspected files and links; keep other user units and lingering unchanged.
-    if ((${#LEGACY_FILES[@]})); then
-        for path in "${LEGACY_FILES[@]}"; do rm -f -- "$path"; done
-    fi
-    if [ "$USER_CONNECTED" = true ]; then userctl daemon-reload; fi
-    printf '%s\n' 'Legacy AutoCheckin user units removed; config, profile and Telegram state preserved.'
-fi
 
 stop_system_units
 mkdir -p -- "$UNIT_DIR"

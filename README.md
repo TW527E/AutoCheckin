@@ -37,8 +37,6 @@ run_checkin.bat --init-config
 }
 ```
 
-也可以參考 [config.example.json](config.example.json)。
-
 `timezone` 使用 IANA 時區名稱；目前預設為 `Asia/Taipei`（UTC+8）。例如台灣伺服器即使系統時區是 UTC+9，簽到日期與排程仍會以 `Asia/Taipei` 計算。
 
 ## 第一次執行
@@ -135,11 +133,15 @@ sudo ./install_linux_systemd.sh \
 
 #### 從舊版使用者服務遷移
 
-安裝器會檢查**所選執行使用者**的 `~/.config/systemd/user`，並公告偵測到的舊版 AutoCheckin units。遷移時會停止舊 timer、簽到與 Telegram 服務，移除已知的 unit 檔及啟用用的符號連結，再安裝系統層級服務。
+安裝器只管理系統層級 units，不會碰 `~/.config/systemd/user`。若你先前裝過舊版 `--user` 服務，請先用原本的帳號停用它們，再安裝系統服務，以免新舊兩套重複執行：
 
-- 不會刪除設定檔、瀏覽器 profile 或狀態資料，也不會變更 lingering 設定或無關服務。
-- 若舊服務清理不完整，會中止遷移，避免新舊服務重複執行。特殊或無法辨識的 overrides 可能需要手動清理後再重新安裝。
-- 不會自動移除其他使用者的舊服務；請依原安裝帳號選擇 `--run-as`，並另行確認其他帳號沒有重複排程。
+```bash
+systemctl --user disable --now autocheckin-checkin.timer autocheckin-telegram.service
+rm -f ~/.config/systemd/user/autocheckin-*.{service,timer}
+systemctl --user daemon-reload
+```
+
+設定檔、瀏覽器 profile 與 Telegram 狀態都不在上述路徑，不會被影響。
 
 #### 查看狀態與移除
 
@@ -168,11 +170,9 @@ journalctl -u autocheckin-telegram.service
   "chat_id": "-1001234567890",
   "error_chat_id": "",
   "admin_chat_ids": [],
-  "poll_commands": true,
   "notifications": {
     "success": true,
-    "error": true,
-    "skipped": false
+    "error": true
   }
 }
 ```
@@ -183,11 +183,10 @@ Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知
 /checkin   立即執行簽到
 /test      發送測試通知
 /toggle    顯示選單並切換通知
-/status    以選單查看通知狀態
 /help      顯示使用說明
 ```
 
-輸入 `/toggle` 或 `/status` 後，Bot 會用附圖的垂直按鈕格式顯示現有通知類型與「全部通知」；按鈕前的 `✅` 表示開啟，`❌` 表示關閉，點擊即可切換狀態。
+輸入 `/toggle` 後，Bot 會用附圖的垂直按鈕格式顯示現有通知類型與「全部通知」；按鈕前的 `✅` 表示開啟，`❌` 表示關閉，點擊即可切換狀態。
 
 `/test` 會立刻發送一則測試訊息，用來確認通知管道正常；它不受通知開關影響，全部關閉時仍會送達，並附上目前開啟的通知類型。若在管理員聊天執行，測試訊息會同時送到設定的目標頻道，可一併確認頻道權限。
 
@@ -197,7 +196,7 @@ Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知
 
 簽到成功後，程式會在通知中附上當下餘額（例如 `餘額：$25.00`）。餘額是用登入後的瀏覽器 session 直接讀取網站本身使用的 `/api/user/self`，並依照網站的 `display_in_currency` 與 `quota_per_unit` 換算，因此與網頁上顯示的金額一致。若餘額讀取失敗（例如網站改版或 session 失效），只會省略這一行並在終端機印出警告，不影響簽到結果與其他通知內容。
 
-Telegram 請求只會送往 `api.telegram.org`：Bot Token 會先檢查字元集並做 percent-encoding，URL 的協定與主機在送出前再次檢查，DNS 解析結果若有私網、環回或 link-local 位址就整筆拒絕，連線固定使用已驗證的位址（避免 DNS rebinding），並且不跟隨離開 Telegram 主機的重新導向。若你的環境需要 proxy（環境變數或系統設定），請求會交給 proxy 解析與轉送，位址檢查由 proxy 負責，因此本機 proxy（例如 `127.0.0.1`）仍可正常運作。
+Telegram 請求只會送往 `api.telegram.org`：主機固定寫在 URL 前綴，Bot Token 會先檢查字元集再做 percent-encoding，因此 Token 只能改變路徑、無法把請求帶到別的主機；連線本身由 HTTPS 憑證驗證保護。
 
 指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行，設定會保存到 `telegram_state.json`。若要在私人聊天操作，請把自己的 Telegram User ID 加入 `admin_chat_ids`。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
 
@@ -206,17 +205,14 @@ Telegram 請求只會送往 `api.telegram.org`：Bot Token 會先檢查字元集
 ```text
 --config PATH                指定 JSON 設定檔
 --init-config                建立設定檔並結束
---login-method password      覆寫登入方式：github 或 password
---username VALUE             覆寫帳號
---password VALUE             覆寫密碼；建議使用 AGENTROUTER_PASSWORD 環境變數
 --browser chrome             選擇 chrome（已安裝）或 chromium（預設）
---profile-dir PATH           覆寫瀏覽器登入狀態位置
---timeout 300                登入等待秒數
 --headless / --no-headless   覆寫是否顯示瀏覽器
 --force                      忽略今日已簽到記錄並重試
 --telegram-listen            持續執行 Telegram 指令監聽服務
 --no-telegram-poll           簽到執行時不輪詢 Telegram（由常駐服務負責時使用）
 ```
+
+其餘設定（`login_method`、帳號密碼、`profile_dir`、`timeout`）請直接編輯 `config.json`。
 
 成功後，同一天再次執行預設會跳過，避免重複登入。若登入 session 過期，重新執行非 headless 模式即可。
 

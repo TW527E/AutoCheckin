@@ -49,7 +49,7 @@ class CommandTestCase(unittest.TestCase):
 class TestCommandTests(CommandTestCase):
     def test_test_command_reports_the_enabled_notifications(self):
         notifier = self.make_notifier()
-        notifier.state["notifications"].update({"success": True, "error": False, "skipped": False})
+        notifier.state["notifications"].update({"success": True, "error": False})
         replies = self.send_command(notifier, "/test")
         self.assertEqual(len(replies), 1)
         self.assertEqual(replies[0][0], self.chat_id)
