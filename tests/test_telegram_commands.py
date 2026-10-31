@@ -206,5 +206,45 @@ class CheckinStateReuseTests(unittest.TestCase):
             self.assertIn("Already checked in today", output.getvalue())
 
 
+class GroupAuthorizationTests(CommandTestCase):
+    def group_message(self, notifier, text, sender):
+        notifier._handle_message(
+            {"chat": {"id": self.chat_id, "type": "supergroup"}, "from": {"id": sender}, "text": text}
+        )
+        return notifier.replies
+
+    def test_group_members_are_refused_once_admins_are_listed(self):
+        notifier = self.make_notifier()
+        notifier.admin_chat_ids = {"4242"}
+        self.assertEqual(self.group_message(notifier, "/help", 1111), [])
+
+    def test_listed_admin_can_still_command_from_the_group(self):
+        notifier = self.make_notifier()
+        notifier.admin_chat_ids = {"4242"}
+        self.assertTrue(self.group_message(notifier, "/help", 4242))
+
+    def test_group_without_admins_keeps_the_old_behaviour(self):
+        notifier = self.make_notifier()
+        self.assertTrue(self.group_message(notifier, "/help", 1111))
+
+    def test_a_single_admin_id_string_is_not_split_into_digits(self):
+        config = {"telegram": {"bot_token": "1:a", "chat_id": "1", "admin_chat_ids": "4242"}}
+        notifier = RecordingNotifier(config, self.directory / "state.json")
+        self.assertEqual(notifier.admin_chat_ids, {"4242"})
+
+
+class ProfileLockTests(unittest.TestCase):
+    def test_second_run_on_the_same_profile_is_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = copy.deepcopy(app.DEFAULT_CONFIG)
+            config["profile_dir"] = directory
+            output = io.StringIO()
+            with app.profile_lock(Path(directory)), redirect_stdout(output), \
+                    patch("playwright.sync_api.sync_playwright") as playwright:
+                self.assertEqual(app.checkin(config, force=True), 0)
+            playwright.assert_not_called()
+            self.assertIn("already using this browser profile", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,20 @@ BOT_COMMANDS = [
 ]
 
 
+GROUP_CHAT_TYPES = {"group", "supergroup"}
+
+
+def _id_set(value: Any) -> set[str]:
+    """Normalise admin_chat_ids; a bare "123" must not become {"1", "2", "3"}."""
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (str, int)):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
 class TelegramNotifier:
     def __init__(
         self,
@@ -53,7 +67,7 @@ class TelegramNotifier:
         # Errors and check-in failures go here instead of the main chat, so a
         # noisy group stays quiet and problems reach the operator's own DM.
         self.error_chat_id = str(telegram.get("error_chat_id") or os.environ.get("TELEGRAM_ERROR_CHAT_ID") or "").strip()
-        self.admin_chat_ids = {str(value) for value in telegram.get("admin_chat_ids", [])}
+        self.admin_chat_ids = _id_set(telegram.get("admin_chat_ids", []))
         self.state_path = state_path.expanduser()
         self.opener = build_opener()
         self.state = self._load_state(telegram.get("notifications", {}))
@@ -162,7 +176,8 @@ class TelegramNotifier:
     def _handle_message(self, message: dict[str, Any]) -> None:
         chat = message.get("chat") or {}
         source_chat_id = str(chat.get("id", ""))
-        if not self._is_authorized(source_chat_id):
+        sender_id = str((message.get("from") or {}).get("id", ""))
+        if not self._is_authorized(source_chat_id, sender_id, str(chat.get("type", ""))):
             return
         text = str(message.get("text") or "").strip()
         if not text.startswith("/"):
@@ -247,7 +262,7 @@ class TelegramNotifier:
         chat = message.get("chat") or {}
         source_chat_id = str(chat.get("id", ""))
         sender_id = str((callback_query.get("from") or {}).get("id", ""))
-        if not self._is_authorized(source_chat_id, sender_id):
+        if not self._is_authorized(source_chat_id, sender_id, str(chat.get("type", ""))):
             self._answer_callback(callback_id, "沒有權限變更通知設定。", show_alert=True)
             return
         data = str(callback_query.get("data") or "")
@@ -285,8 +300,15 @@ class TelegramNotifier:
             except Exception as exc:
                 print(f"Warning: Telegram menu update failed: {exc}")
 
-    def _is_authorized(self, chat_id: str, sender_id: str = "") -> bool:
-        return chat_id == self.chat_id or chat_id in self.admin_chat_ids or sender_id in self.admin_chat_ids
+    def _is_authorized(self, chat_id: str, sender_id: str = "", chat_type: str = "") -> bool:
+        if (sender_id and sender_id in self.admin_chat_ids) or chat_id in self.admin_chat_ids:
+            return True
+        if chat_id != self.chat_id:
+            return False
+        # The notification chat is often a group, where every member shares the
+        # chat id. Once admins are listed, only they may run /checkin force or
+        # flip the notification switches there.
+        return not (chat_type in GROUP_CHAT_TYPES and self.admin_chat_ids)
 
     def _answer_callback(self, callback_id: str, text: str, show_alert: bool = False) -> None:
         if not callback_id:

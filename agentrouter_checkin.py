@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -197,6 +198,38 @@ def read_checkin_state(config: dict[str, Any]) -> str | None:
     return state_file.read_text(encoding="utf-8").strip() or None
 
 
+class ProfileBusy(RuntimeError):
+    """Another check-in (timer or Telegram-triggered) is using the profile."""
+
+
+@contextlib.contextmanager
+def profile_lock(profile_dir: Path):
+    """Hold an exclusive lock so two runs never open the same browser profile.
+
+    The scheduled run and a Telegram /checkin can start at the same moment;
+    Chromium refuses a second process on one user_data_dir, which used to
+    surface as a confusing launch error.
+    """
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    handle = (profile_dir / ".autocheckin.lock").open("a+")
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ProfileBusy(str(profile_dir)) from exc
+        yield
+    finally:
+        handle.close()
+
+
 class CheckinTrigger:
     """Runs a check-in on behalf of a Telegram command.
 
@@ -317,10 +350,21 @@ def checkin(config: dict[str, Any], force: bool, notifier: TelegramNotifier | No
     profile_dir.mkdir(parents=True, exist_ok=True)
     state_file = checkin_state_path(config)
     today = datetime.now(ZoneInfo(config["timezone"])).date().isoformat()
-    if config["skip_if_checked_in"] and not force and read_checkin_state(config) == today:
-        print(f"Already checked in today ({today}); skipping duplicate login.")
+    try:
+        with profile_lock(profile_dir):
+            # Checked under the lock so a run that just finished is respected.
+            if config["skip_if_checked_in"] and not force and read_checkin_state(config) == today:
+                print(f"Already checked in today ({today}); skipping duplicate login.")
+                return 0
+            return _checkin_locked(config, profile_dir, state_file, today, notifier,
+                                   sync_playwright, PlaywrightError, PlaywrightTimeoutError)
+    except ProfileBusy:
+        print("Another check-in is already using this browser profile; skipping this run.")
         return 0
 
+
+def _checkin_locked(config, profile_dir, state_file, today, notifier,
+                    sync_playwright, PlaywrightError, PlaywrightTimeoutError) -> int:
     with sync_playwright() as pw:
         browser_options = {"channel": "chrome"} if config["browser"] == "chrome" else {}
         try:
