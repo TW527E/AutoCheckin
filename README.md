@@ -99,7 +99,7 @@ macOS 可用 `launchd`，Windows 可用「工作排程器」。建議每天執�
 
 ### Linux systemd
 
-Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`，並確認設定檔已完成，尤其是 `login_method`、帳號密碼、`headless: true` 與 `timezone: "Asia/Taipei"`：
+Linux 使用 systemd 時，請先安裝 Python 3、`python3-venv`（全新的伺服器若缺少 Chromium 執行所需的系統函式庫，可在第一次執行啟動腳本後執行 `sudo .venv/bin/python -m playwright install-deps chromium`），並確認設定檔已完成，尤其是 `login_method`、帳號密碼、`headless: true` 與 `timezone: "Asia/Taipei"`：
 
 ```bash
 ./run_checkin.sh --init-config
@@ -198,7 +198,7 @@ Bot 必須被加入目標頻道並授予發送訊息權限。`success` 會通知
 
 Telegram 請求只會送往 `api.telegram.org`：主機固定寫在 URL 前綴，Bot Token 會先檢查字元集再做 percent-encoding，因此 Token 只能改變路徑、無法把請求帶到別的主機；連線本身由 HTTPS 憑證驗證保護。
 
-指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行，設定會保存到 `telegram_state.json`。若要在私人聊天操作，請把自己的 Telegram User ID 加入 `admin_chat_ids`。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
+指令可在目標頻道或 `admin_chat_ids` 指定的管理員聊天中執行，設定會保存到 `telegram_state.json`。若要在私人聊天操作，請把自己的 Telegram User ID 加入 `admin_chat_ids`。若 `chat_id` 是群組且 `admin_chat_ids` 不是空的，群組裡只有名單內的成員能下指令或切換通知；`admin_chat_ids` 留空時維持舊行為（群組內任何成員都能下指令）。systemd 安裝器會在 Bot Token 與 Chat ID 都已設定時啟動指令服務；若尚未設定，之後更新設定檔後重新執行安裝器即可。
 
 ## 常用選項
 
