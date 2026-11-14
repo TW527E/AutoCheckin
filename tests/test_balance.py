@@ -107,6 +107,26 @@ class CheckinBalanceTests(unittest.TestCase):
         self.assertIn("登入方式：password", message)
         self.assertIn("餘額：$25.00", message)
 
+    def test_login_that_the_account_api_refuses_is_not_recorded(self):
+        notifier = MagicMock()
+        page = make_page("https://agentrouter.org/error", evaluate_result={"state": "signed_out"})
+        with tempfile.TemporaryDirectory() as directory:
+            config = copy.deepcopy(app.DEFAULT_CONFIG)
+            config.update(login_method="password", username="user", password="secret", profile_dir=directory)
+            with patch("playwright.sync_api.sync_playwright") as playwright, patch.object(
+                app, "start_password_login"
+            ), patch.object(app, "wait_until_signed_in", return_value=True), redirect_stdout(io.StringIO()), \
+                    redirect_stderr(io.StringIO()):
+                launch = playwright.return_value.__enter__.return_value.chromium.launch_persistent_context
+                launch.return_value.pages = [page]
+                self.assertEqual(app.checkin(config, force=True, notifier=notifier), 1)
+            self.assertIsNone(app.read_checkin_state(config))
+        self.assertEqual(notifier.send.call_args.args[0], "error")
+
+    def test_look_alike_host_is_not_the_site(self):
+        self.assertTrue(app.on_site("https://agentrouter.org/console"))
+        self.assertFalse(app.on_site("https://agentrouter.org.evil.example/console"))
+
     def test_checkin_still_succeeds_when_the_balance_is_unavailable(self):
         notifier = MagicMock()
         page = make_page()

@@ -101,11 +101,35 @@ class TelegramNotifier:
             state["update_offset"] = loaded["update_offset"]
         return state
 
+    def _refresh_state(self) -> None:
+        """Pick up what another process saved since this one started.
+
+        The timer run and the listener service share one state file. Without
+        this, whichever saves last would write its start-up copy back and undo
+        the other's notification switches or replay already handled updates.
+        """
+        try:
+            loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(loaded, dict):
+            return
+        saved_notifications = loaded.get("notifications")
+        if isinstance(saved_notifications, dict):
+            for name in NOTIFICATION_TYPES:
+                if name in saved_notifications:
+                    self.state["notifications"][name] = bool(saved_notifications[name])
+        if isinstance(loaded.get("update_offset"), int):
+            self.state["update_offset"] = max(self.state["update_offset"], loaded["update_offset"])
+
     def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # Write a private temporary file and swap it in, so a reader never sees half a file.
+        temporary = self.state_path.with_name(self.state_path.name + f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(self.state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if os.name != "nt":
-            self.state_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary, self.state_path)
 
     def _request(self, method: str, payload: dict[str, Any], timeout: int = 15) -> Any:
         body = urlencode({key: json.dumps(value) if isinstance(value, (list, dict)) else value for key, value in payload.items()}).encode()
@@ -150,6 +174,7 @@ class TelegramNotifier:
     def poll_commands(self, timeout: int = 0) -> None:
         if not self.configured:
             return
+        self._refresh_state()
         updates = self._request(
             "getUpdates",
             {
@@ -160,7 +185,13 @@ class TelegramNotifier:
             timeout=max(15, timeout + 15),
         )
         changed = False
+        if updates:
+            # A long poll can last many seconds; take the latest saved switches before applying changes.
+            self._refresh_state()
         for update in updates or []:
+            if isinstance(update, dict) and isinstance(update.get("update_id"), int) \
+                    and update["update_id"] < self.state["update_offset"]:
+                continue  # another process already handled it
             if isinstance(update, dict) and isinstance(update.get("update_id"), int):
                 self.state["update_offset"] = update["update_id"] + 1
                 changed = True
@@ -262,7 +293,7 @@ class TelegramNotifier:
         chat = message.get("chat") or {}
         source_chat_id = str(chat.get("id", ""))
         sender_id = str((callback_query.get("from") or {}).get("id", ""))
-        if not self._is_authorized(source_chat_id, sender_id, str(chat.get("type", ""))):
+        if not self._is_authorized(source_chat_id, sender_id, str(chat.get("type", "")), button=True):
             self._answer_callback(callback_id, "沒有權限變更通知設定。", show_alert=True)
             return
         data = str(callback_query.get("data") or "")
@@ -300,7 +331,7 @@ class TelegramNotifier:
             except Exception as exc:
                 print(f"Warning: Telegram menu update failed: {exc}")
 
-    def _is_authorized(self, chat_id: str, sender_id: str = "", chat_type: str = "") -> bool:
+    def _is_authorized(self, chat_id: str, sender_id: str = "", chat_type: str = "", button: bool = False) -> bool:
         if (sender_id and sender_id in self.admin_chat_ids) or chat_id in self.admin_chat_ids:
             return True
         if chat_id != self.chat_id:
@@ -308,7 +339,9 @@ class TelegramNotifier:
         # The notification chat is often a group, where every member shares the
         # chat id. Once admins are listed, only they may run /checkin force or
         # flip the notification switches there.
-        return not (chat_type in GROUP_CHAT_TYPES and self.admin_chat_ids)
+        # A button under a channel post can be pressed by any subscriber, so with
+        # admins listed a press always needs an admin's own user id.
+        return not ((chat_type in GROUP_CHAT_TYPES or button) and self.admin_chat_ids)
 
     def _answer_callback(self, callback_id: str, text: str, show_alert: bool = False) -> None:
         if not callback_id:
