@@ -12,6 +12,7 @@ import stat
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -128,9 +129,15 @@ def login_controls_visible(page) -> bool:
     return False
 
 
+def on_site(url: str | None) -> bool:
+    """True only for the site's exact origin, not a look-alike host that shares the prefix."""
+    parsed = urllib.parse.urlsplit(url or "")
+    return f"{parsed.scheme}://{parsed.netloc}" == SITE_ORIGIN
+
+
 def is_authenticated_page(page) -> bool:
     url = page.url or ""
-    if not url.startswith(SITE_ORIGIN):
+    if not on_site(url):
         return False
     if "/login" not in url:
         return True
@@ -164,9 +171,56 @@ def format_quota(quota: float, quota_per_unit: float, display_in_currency: bool)
     return f"{quota:.0f}"
 
 
+# Asks the site's own account endpoint whether this browser holds a session.
+SESSION_SCRIPT = """
+async () => {
+  const readUserId = () => {
+    try {
+      const id = Number(JSON.parse(localStorage.getItem("user")).id);
+      return Number.isFinite(id) ? id : null;
+    } catch (error) {
+      return null;
+    }
+  };
+  // Right after sign-in the single-page app may not have stored the account
+  // yet, and the server refuses /api/user/self without its id: wait for it.
+  const deadline = Date.now() + 5000;
+  let userId = readUserId();
+  while (userId === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    userId = readUserId();
+  }
+  const headers = { Accept: "application/json" };
+  if (userId !== null) headers["New-API-User"] = String(userId);
+  const response = await fetch("/api/user/self", { headers, credentials: "same-origin" });
+  if (response.status === 401 || response.status === 403) return { state: "signed_out" };
+  if (!response.ok) return { state: "unknown" };
+  const account = await response.json();
+  return { state: account && account.success === true && account.data ? "signed_in" : "signed_out" };
+}
+"""
+
+
+def session_refused(page) -> bool:
+    """True only when the account API clearly answers "not signed in".
+
+    Leaving /login is not proof of a sign-in: an error page does that too. A
+    network failure or an unexpected answer is not treated as a refusal, so a
+    flaky API cannot turn a good check-in into an error.
+    """
+    if not on_site(page.url):
+        return True
+    try:
+        result = page.evaluate(SESSION_SCRIPT)
+    except Exception as exc:
+        print(f"Warning: could not ask the account API about the session: {exc}", file=sys.stderr)
+        return False
+    return isinstance(result, dict) and result.get("state") == "signed_out"
+
+
 def read_balance(page) -> str | None:
     """Return the current balance as displayed by the site, or None on failure."""
-    if not (page.url or "").startswith(SITE_ORIGIN):
+    if not on_site(page.url):
         return None
     try:
         result = page.evaluate(BALANCE_SCRIPT)
@@ -253,12 +307,28 @@ class CheckinTrigger:
         return "🚀 已開始執行簽到，結果會以簽到通知回報。"
 
     def _run(self, force: bool) -> None:
+        run = checkin
         try:
             # A separate notifier keeps this run out of the listener's polling
             # state; it only sends the notification for this check-in.
-            checkin(self.config, force, TelegramNotifier(self.config, self.state_path))
+            notifier = TelegramNotifier(self.config, self.state_path)
         except Exception as exc:
             print(f"Triggered check-in failed: {exc}", file=sys.stderr)
+            return
+        try:
+            run(self.config, force, notifier)
+        except Exception as exc:
+            print(f"Triggered check-in failed: {exc}", file=sys.stderr)
+            # The command already answered "started"; report the failure the same way a timer run would.
+            try:
+                notifier.send("error", f"AgentRouter 簽到發生未預期錯誤：{exc}")
+            except Exception as send_error:
+                print(f"Could not send the error notification: {send_error}", file=sys.stderr)
+
+    def wait(self) -> None:
+        """Block until a check-in started by a command has finished."""
+        if self.thread is not None:
+            self.thread.join()
 
 
 def write_example_config(path: Path) -> None:
@@ -392,7 +462,7 @@ def _checkin_locked(config, profile_dir, state_file, today, notifier,
         except Exception:
             pass
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        if "/login" not in (page.url or ""):
+        if "/login" not in (page.url or "") and not session_refused(page):
             print(f"Login page redirected to an authenticated page: {page.url}")
             state_file.write_text(today + "\n", encoding="utf-8")
             balance = read_balance(page)
@@ -438,6 +508,16 @@ def _checkin_locked(config, profile_dir, state_file, today, notifier,
             return 1
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(1500)
+        if session_refused(page):
+            # Do not record today as done, so the next scheduled run tries again.
+            print(f"The account API says this browser is not signed in. Current URL: {page.url}", file=sys.stderr)
+            if notifier:
+                notifier.send(
+                    "error",
+                    f"AgentRouter 簽到錯誤：登入流程結束，但帳戶 API 回應尚未登入，今日未記錄為已簽到。\n目前網址：{page.url}",
+                )
+            context.close()
+            return 1
         state_file.write_text(today + "\n", encoding="utf-8")
         print(f"Signed in successfully with {config['login_method']}: {page.url}")
         balance = read_balance(page)
@@ -492,7 +572,8 @@ def main() -> int:
         }
         config.update({key: value for key, value in overrides.items() if value is not None})
         state_path = config_path.parent / "telegram_state.json"
-        notifier = TelegramNotifier(config, state_path, CheckinTrigger(config, state_path))
+        trigger = CheckinTrigger(config, state_path)
+        notifier = TelegramNotifier(config, state_path, trigger)
         validate_config(config)
     except ValueError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
@@ -518,6 +599,10 @@ def main() -> int:
         print(f"Unexpected check-in error: {exc}", file=sys.stderr)
         notifier.send("error", f"AgentRouter 簽到發生未預期錯誤：{exc}")
         return 1
+    finally:
+        # A pending /checkin picked up above runs in a daemon thread. If it holds the profile
+        # lock, this run returns at once; leaving now would kill that check-in halfway.
+        trigger.wait()
 
 
 if __name__ == "__main__":
