@@ -174,11 +174,22 @@ def format_quota(quota: float, quota_per_unit: float, display_in_currency: bool)
 # Asks the site's own account endpoint whether this browser holds a session.
 SESSION_SCRIPT = """
 async () => {
-  let userId = null;
-  try {
-    const id = Number(JSON.parse(localStorage.getItem("user")).id);
-    if (Number.isFinite(id)) userId = id;
-  } catch (error) {}
+  const readUserId = () => {
+    try {
+      const id = Number(JSON.parse(localStorage.getItem("user")).id);
+      return Number.isFinite(id) ? id : null;
+    } catch (error) {
+      return null;
+    }
+  };
+  // Right after sign-in the single-page app may not have stored the account
+  // yet, and the server refuses /api/user/self without its id: wait for it.
+  const deadline = Date.now() + 5000;
+  let userId = readUserId();
+  while (userId === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    userId = readUserId();
+  }
   const headers = { Accept: "application/json" };
   if (userId !== null) headers["New-API-User"] = String(userId);
   const response = await fetch("/api/user/self", { headers, credentials: "same-origin" });
